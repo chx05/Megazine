@@ -2,4 +2,10 @@ Store to disk and manage any in-language structure in the most efficient way pos
 
 From the "magazine" concept of storing objects, to the "megabytes" idea of handling huge data seamlesly.
 
-- developed @ ancient_labs
+<br>
+
+---
+
+<br>
+
+<p align="center">developed @ ancient_labs</p>
