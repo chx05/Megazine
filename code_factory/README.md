@@ -1,0 +1,1 @@
+This folder is foundamental to the project as it handles the source generation for your annotated structs, which allows your code to sync data to the disk without writing a single line of serialization!

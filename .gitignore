@@ -1,0 +1,5 @@
+*.out
+*.g.h
+.vscode/
+__pycache__/
+*.egg-info/
