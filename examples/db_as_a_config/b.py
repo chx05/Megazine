@@ -1,6 +1,7 @@
 import fct
 
 import megazine
-fct.install_tools(periodics=[megazine], manuals=[])
-fct.use_c_instead()
+import fct_toolbox
+fct.install_tools(periodics=[megazine, fct_toolbox.struct_repr], manuals=[])
+#fct.use_c_instead()
 fct.run_argv()
