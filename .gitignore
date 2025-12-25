@@ -1,7 +1,3 @@
 *.out
 *.g.h
 .vscode/
-__pycache__/
-*.egg-info/
-lib/externals/*
-!lib/externals/README.md
