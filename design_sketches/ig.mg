@@ -1,5 +1,3 @@
-| general concept: all manual BUT heavily assisted with debug builds full of helper errors/warning/reports
-
 CommentID u64
 Comment
   id CommentID #key

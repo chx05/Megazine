@@ -1,0 +1,2 @@
+* all manual BUT heavily assisted with debug builds full of helper errors/warning/reports
+* consider rewriting all the examples without the .get() trouble, there should be a ergonomic syntax to fetch linked entities
