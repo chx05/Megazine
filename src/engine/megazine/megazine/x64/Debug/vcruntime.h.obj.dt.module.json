@@ -1,0 +1,14 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "megazine\\x64\\Debug\\vcruntime.obj",
+            "outputs": [
+                "megazine\\x64\\Debug\\vcruntime.h.obj.dt.module.json",
+                "megazine\\x64\\Debug\\vcruntime.h.obj.dt.d.json"
+            ],
+            "requires": []
+        }
+    ]
+}

@@ -1,0 +1,1 @@
+@gcc main.c -I. -L. -lmdbx -lntdll -lwinmm -pthread -o myprog.exe

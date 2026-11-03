@@ -1,0 +1,14 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "megazine\\x64\\Debug\\megazine.obj",
+            "outputs": [
+                "megazine\\x64\\Debug\\megazine.cpp.obj.dt.module.json",
+                "megazine\\x64\\Debug\\megazine.cpp.obj.dt.d.json"
+            ],
+            "requires": []
+        }
+    ]
+}

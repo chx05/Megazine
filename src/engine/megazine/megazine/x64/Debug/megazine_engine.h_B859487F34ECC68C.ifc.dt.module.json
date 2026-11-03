@@ -1,0 +1,22 @@
+{
+    "version": 1,
+    "revision": 0,
+    "rules": [
+        {
+            "primary-output": "megazine\\x64\\Debug\\megazine_engine.obj",
+            "outputs": [
+                "megazine\\x64\\Debug\\megazine_engine.h_B859487F34ECC68C.ifc.dt.module.json",
+                "megazine\\x64\\Debug\\megazine_engine.h_B859487F34ECC68C.ifc.dt.d.json",
+                "megazine\\x64\\Debug\\megazine_engine.h.ifc"
+            ],
+            "provides": [
+                {
+                    "logical-name": "C:\\Users\\junio\\temp\\megazine\\src\\engine\\megazine\\megazine_engine.h",
+                    "source-path": "c:\\users\\junio\\temp\\megazine\\src\\engine\\megazine\\megazine_engine.h",
+                    "lookup-method": "absolute"
+                }
+            ],
+            "requires": []
+        }
+    ]
+}
