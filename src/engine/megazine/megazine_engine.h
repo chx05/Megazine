@@ -32,6 +32,12 @@ struct read_transaction
 	file_descriptor_t fd;
 };
 
+struct write_transaction
+{
+	struct diff_buffer diff_buffer;
+	file_descriptor_t fd;
+};
+
 struct db
 {
 	char const* filename;
@@ -224,6 +230,11 @@ void close_db(struct db* db)
 	deinit_diff_buffer(&db->readonly_base);
 }
 
+// TODO
+// right now it clones the whole diff buffer
+// instead, it should clone the map only
+// and the map should contain pointers instead
+// so that it can store memory of different allocators
 struct read_transaction begin_read_transaction(struct db* db)
 {
 	struct read_transaction trx;
