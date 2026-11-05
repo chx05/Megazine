@@ -1,10 +1,12 @@
+#pragma once
+
 #define NOMINMAX
 #include <stdint.h>
 #include <stdbool.h>
 #include <windows.h>
 #include <atomic>
 #include <algorithm>
-#include <mutex>
+#include <cassert>
 
 // TODO
 // try using mmap() for lazy loading instead, the mutex and all the stuff
@@ -12,6 +14,9 @@
 // for writers, the diff mechanism can be built ontop of it
 // for readers it makes no difference
 // BUT first it must be clear what's the workflow for committing correctly
+
+// TODO
+// add asserts and report helpers in debug builds
 
 
 template<typename T>
@@ -57,7 +62,8 @@ struct __DeferredCloser
 using page_flag_t = std::atomic<uint8_t>;
 using refcounter_t = std::atomic<uint64_t>;
 using file_descriptor_t = HANDLE;
-using arena_offset_t = uint64_t;
+// points to chunk of contiguous memory with length PAGE_SIZE
+using page_ref_t = uint8_t*;
 
 constexpr uint64_t PAGE_SIZE = 16;
 constexpr uint64_t INITIAL_MIN_PAGES_COUNT = 10;
@@ -73,9 +79,23 @@ inline bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void
 	OVERLAPPED ov = { 0 };
 	ov.Offset = (DWORD)(file_offset);
 	ov.OffsetHigh = (DWORD)(file_offset >> 32);
+	ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+	if (ov.hEvent == 0)
+		return false;
 
 	DWORD bytes = 0;
-	return ReadFile(fd, dest_buffer, (DWORD)PAGE_SIZE, &bytes, &ov);
+	BOOL ok = ReadFile(fd, dest_buffer, (DWORD)PAGE_SIZE, &bytes, &ov);
+	if (!ok)
+	{
+		if (GetLastError() == ERROR_IO_PENDING)
+		{
+			// Wait synchronously for this specific thread's operation
+			ok = GetOverlappedResult(fd, &ov, &bytes, TRUE);
+		}
+	}
+
+	CloseHandle(ov.hEvent);
+	return ok && (bytes == PAGE_SIZE);
 }
 
 inline bool write_page_to_file(file_descriptor_t fd, uint64_t file_offset, void const* source_buffer)
@@ -95,22 +115,20 @@ struct PagesMap
 {
 	uint64_t count = 0;
 	uint64_t capacity = 0;
-	arena_offset_t* array = nullptr;
+	page_ref_t* array = nullptr;
 	page_flag_t* flags = nullptr;
 
-	static PagesMap create(uint64_t file_size)
+	void init(uint64_t file_size)
 	{
-		PagesMap map;
-		map.count = file_size / PAGE_SIZE;
-		map.capacity = std::max(map.count, INITIAL_MIN_PAGES_COUNT);
-		map.array = new arena_offset_t[map.capacity];
-		map.flags = new page_flag_t[map.capacity];
+		count = file_size / PAGE_SIZE;
+		// TODO this could theoretically go away if used only for reader transactions
+		capacity = std::max(count, INITIAL_MIN_PAGES_COUNT);
+		array = new page_ref_t[capacity];
+		flags = new page_flag_t[capacity];
 
 		// TODO memset should be safe here
-		for (uint64_t i = 0; i < map.capacity; ++i)
-			map.flags[i].store(PAGE_FLAG_NOT_LOADED, std::memory_order_relaxed);
-
-		return map;
+		for (uint64_t i = 0; i < capacity; ++i)
+			flags[i].store(PAGE_FLAG_NOT_LOADED, std::memory_order_relaxed);
 	}
 
 	void drop()
@@ -131,13 +149,11 @@ struct Arena
 	uint64_t capacity = 0;
 	T* buffer = nullptr;
 
-	static Arena create(uint64_t initial_capacity)
+	void init(uint64_t initial_capacity)
 	{
-		Arena arena;
-		arena.count = 0;
-		arena.capacity = initial_capacity;
-		arena.buffer = new T[initial_capacity];
-		return arena;
+		count = 0;
+		capacity = initial_capacity;
+		buffer = new T[initial_capacity];
 	}
 
 	void drop()
@@ -152,36 +168,184 @@ struct Arena
 	{
 		if (count + incoming_count >= capacity)
 		{
+			auto old_buffer = buffer;
+
 			capacity = std::max(capacity * 2, capacity + incoming_count);
 			auto new_buffer = new T[capacity];
-			memcpy(new_buffer, buffer, count); // this is bypassing RAII, which is good in this code base
-			auto old_buffer = buffer;
-			buffer = new_buffer; // this should be made atomic imo, see TrxR::get_page
+			memcpy(new_buffer, old_buffer, count); // this is bypassing RAII, which is good in this code base
+			buffer = new_buffer;
 
 			delete[] old_buffer;
 		}
 	}
 
-	T* alloc()
+	T* alloc_many(uint64_t requested_count)
 	{
-		ensure_has_space_for(1);
-		count++;
-		return &buffer[count - 1];
+		ensure_has_space_for(requested_count);
+		auto start = count;
+		count += requested_count;
+		return &buffer[start];
 	}
 };
 
-struct PagedBuffer
+template<typename T>
+struct StableArenaBufferNode
 {
-	Arena<uint8_t> arena;
-	PagesMap map;
-	// protects arena allocation
-	// this takes negligible time compared to disk i/o that happens in the meanwhile
-	std::mutex arena_mutex;
+	uint32_t len = 0;
+	T* buffer = nullptr;
+	StableArenaBufferNode* previous_node = nullptr;
+};
+
+template<typename T>
+struct StableArena
+{
+	uint32_t capacity_per_node = 0;
+	StableArenaBufferNode<T>* last_node = nullptr;
+
+	void init(uint32_t initial_capacity)
+	{
+		assert(initial_capacity > 0);
+		capacity_per_node = initial_capacity;
+
+		last_node = new StableArenaBufferNode<T>{
+			.len = 0,
+			.buffer = new T[initial_capacity],
+			.previous_node = nullptr
+		};
+	}
+
+	void drop()
+	{
+		auto* node = last_node;
+		last_node = nullptr;
+
+		while (node)
+		{
+			for (uint32_t i = 0; i < node->len; i++)
+				node->buffer[i].drop();
+
+			auto* prev = node->previous_node;
+			delete[] node->buffer;
+			delete node;
+			node = prev;
+		}
+	}
+
+	T* alloc_many(uint32_t requested_count)
+	{
+		assert(requested_count <= capacity_per_node);
+		assert(last_node != nullptr);
+
+		// full node: link a new node
+		if (last_node->len + requested_count > capacity_per_node)
+		{
+			last_node = new StableArenaBufferNode<T>{
+				.len = 0,
+				.buffer = new T[capacity_per_node],
+				.previous_node = last_node
+			};
+		}
+
+		// allocates on node
+		T* ptr = &last_node->buffer[last_node->len];
+		last_node->len += requested_count;
+		return ptr;
+	}
+};
+
+
+struct SharedArenaBufferNode
+{
+	std::atomic<uint32_t> len{ 0 };
+	uint8_t* buffer = nullptr;
+	SharedArenaBufferNode* previous_node = nullptr;
+};
+
+struct SharedArena
+{
+	uint32_t capacity_per_node = 0;
+	std::atomic<SharedArenaBufferNode*> last_node{ nullptr };
+
+	void init(uint32_t initial_capacity)
+	{
+		auto* first_node = new SharedArenaBufferNode{
+			.len = { 0 },
+			.buffer = new uint8_t[initial_capacity],
+			.previous_node = nullptr
+		};
+
+		capacity_per_node = initial_capacity;
+		last_node.store(first_node, std::memory_order_relaxed);
+	}
+
+	void drop()
+	{
+		auto* curr = last_node.exchange(nullptr, std::memory_order_acquire);
+		while (curr)
+		{
+			auto* prev = curr->previous_node;
+			delete[] curr->buffer;
+			delete curr;
+			curr = prev;
+		}
+	}
+
+	uint8_t* alloc(uint32_t requested_size)
+	{
+		assert(requested_size <= capacity_per_node);
+
+		while (true)
+		{
+			auto* node = last_node.load(std::memory_order_acquire);
+			uint32_t offset = node->len.load(std::memory_order_relaxed);
+
+			// allocate in last_node if there is space
+			while (offset + requested_size <= capacity_per_node)
+			{
+				if (node->len.compare_exchange_weak(offset, offset + requested_size, std::memory_order_relaxed))
+				{
+					return &node->buffer[offset];
+				}
+			}
+
+			// last_node full, allocate a new one
+			auto* new_node = new SharedArenaBufferNode{
+				.len = { 0 },
+				// TODO
+				// take in input a per-thread custom allocator instead
+				// and use it to allocate each node's buffer
+				// so the thread has control over the allocation
+				.buffer = new uint8_t[capacity_per_node],
+				.previous_node = node
+			};
+
+			if (last_node.compare_exchange_strong(node, new_node,
+				std::memory_order_release,
+				std::memory_order_acquire))
+			{
+				// winner, the next cycle will allocate
+			}
+			else
+			{
+				// looser, another thread added a new node first
+				// i clean up and the next cycle will allocate using that
+				delete[] new_node->buffer;
+				delete new_node;
+			}
+		}
+	}
+};
+
+
+struct SharedPagedBuffer
+{
+	SharedArena arena{};
+	PagesMap map{};
 
 	void init(uint64_t file_size)
 	{
-		arena = Arena<uint8_t>::create(PAGE_SIZE * INITIAL_MIN_PAGES_COUNT);
-		map = PagesMap::create(file_size);
+		arena.init(PAGE_SIZE * INITIAL_MIN_PAGES_COUNT);
+		map.init(file_size);
 	}
 
 	void drop()
@@ -192,23 +356,18 @@ struct PagedBuffer
 
 	void alloc_and_map_page(uint64_t page_index)
 	{
-		std::lock_guard lock(arena_mutex);
-
-		arena.ensure_has_space_for(PAGE_SIZE);
-		map.array[page_index] = arena.count;
-		arena.count += PAGE_SIZE;
+		map.array[page_index] = (page_ref_t)arena.alloc(PAGE_SIZE);
 	}
-
 
 	uint8_t* pointer_of(uint64_t page_index)
 	{
-		return &arena.buffer[map.array[page_index]];
+		return map.array[page_index];
 	}
 };
 
 struct SharedReadonlyPagedBuffer
 {
-	PagedBuffer paged_buffer;
+	SharedPagedBuffer paged_buffer{};
 	refcounter_t refc{ 0 };
 
 	void init(uint64_t file_size)
@@ -222,9 +381,13 @@ struct SharedReadonlyPagedBuffer
 	}
 };
 
+using root_t = SharedReadonlyPagedBuffer;
+
+struct Db;
 struct TrxR
 {
-	SharedReadonlyPagedBuffer* root = nullptr;
+	Db* db_ref;
+	root_t* root = nullptr;
 	file_descriptor_t fd = INVALID_HANDLE_VALUE;
 
 	void load_page(uint64_t page_index)
@@ -234,10 +397,6 @@ struct TrxR
 		read_page_from_file(fd, file_offset, root->paged_buffer.pointer_of(page_index));
 	}
 
-	// TODO
-	// this should return a relative offset to the arena
-	// otherwise the pointer can be invalidated by another thread even before this function returns.
-	// but what happens when the shared arena is being reallocated?
 	uint8_t const* get_page(uint64_t page_index)
 	{
 		auto& flag = root->paged_buffer.map.flags[page_index];
@@ -269,50 +428,40 @@ struct TrxR
 		return root->paged_buffer.map.count;
 	}
 
-	void close()
-	{
-		if (root) {
-			root->refc--;
-		}
-	}
+	void close();
 };
 
 struct RootsPool
 {
-	Arena<SharedReadonlyPagedBuffer> arena;
-	uint64_t free_slots_count = 0;
-	uint64_t* free_slots = nullptr;
+	StableArena<root_t> pool{};
+	Arena<root_t*> free_slots{};
 
-	static RootsPool create()
+	void init()
 	{
-		RootsPool pool;
-		pool.arena = Arena<SharedReadonlyPagedBuffer>::create(INITIAL_ROOTS_POOL_CAPACITY);
-		pool.free_slots_count = 0;
-		pool.free_slots = new uint64_t[pool.arena.capacity];
-		return pool;
+		pool.init(INITIAL_ROOTS_POOL_CAPACITY);
+		free_slots.init(INITIAL_ROOTS_POOL_CAPACITY);
 	}
 
 	void drop()
 	{
-		for (uint64_t i = 0; i < arena.count; i++)
-			arena.buffer[i].drop();
-		
-		arena.drop();
-		delete[] free_slots;
-		free_slots = nullptr;
-		free_slots_count = 0;
+		pool.drop();
+		free_slots.drop();
 	}
 
-	SharedReadonlyPagedBuffer* alloc_root()
+	root_t* alloc_root()
 	{
-		if (free_slots_count > 0)
+		if (free_slots.count > 0)
 		{
-			free_slots_count--;
-			auto idx = free_slots[free_slots_count];
-			return &arena.buffer[idx];
+			free_slots.count--;
+			return free_slots.buffer[free_slots.count];
 		}
 
-		return arena.alloc();
+		return pool.alloc_many(1);
+	}
+
+	void free_root(root_t* root)
+	{
+		*free_slots.alloc_many(1) = root;
 	}
 };
 
@@ -321,36 +470,31 @@ struct Db
 	char const* filename = nullptr;
 	file_descriptor_t fd = INVALID_HANDLE_VALUE;
 	uint64_t file_size = 0;
-	SharedReadonlyPagedBuffer* root = nullptr;
-	RootsPool roots_pool;
+	RootsPool roots_pool{};
+	std::atomic<root_t*> root{ 0 };
 
-	static Db open(char const* filename)
+	void open(char const* db_filename)
 	{
-		auto fd = CreateFileA(
+		filename = db_filename;
+		fd = CreateFileA(
 			filename,
 			GENERIC_READ | GENERIC_WRITE,
 			FILE_SHARE_READ,
 			NULL,
 			OPEN_ALWAYS,
-			FILE_ATTRIBUTE_NORMAL,
+			FILE_FLAG_OVERLAPPED,
 			NULL
 		);
 
 		LARGE_INTEGER file_size_result;
 		GetFileSizeEx(fd, &file_size_result);
-		auto file_size = (uint64_t)file_size_result.QuadPart;
+		file_size = (uint64_t)file_size_result.QuadPart;
 
-		auto roots_pool = RootsPool::create();
-		auto root = roots_pool.alloc_root();
-		root->paged_buffer.init(file_size);
+		roots_pool.init();
+		auto first_root = roots_pool.alloc_root();
+		first_root->init(file_size);
 
-		return Db{
-			.filename = filename,
-			.fd = fd,
-			.file_size = file_size,
-			.root = root,
-			.roots_pool = roots_pool
-		};
+		root.store(first_root, std::memory_order_acquire);
 	}
 
 	void close()
@@ -371,10 +515,21 @@ struct Db
 
 	TrxR trx_r()
 	{
-		root->refc++;
-		return TrxR{ .root = root, .fd = fd };
+		auto rtx_root = root.load(std::memory_order_acquire);
+		rtx_root->refc++;
+		return TrxR{ .db_ref = this, .root = rtx_root, .fd = fd};
 	}
 };
+
+inline void TrxR::close()
+{
+	if (root != nullptr && --root->refc == 0 && db_ref->root.load(std::memory_order_relaxed) != root)
+	{
+		root->drop();
+		root = nullptr;
+	}
+}
+
 
 //
 //bool add_blank_page(struct PagedBuffer* b, uint64_t* out_page_index)

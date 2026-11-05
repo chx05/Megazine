@@ -145,6 +145,7 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="megazine_engine.cpp" />
     <ClCompile Include="megazine_test.cpp" />
     <ClCompile Include="megazine_engine.hpp" />
   </ItemGroup>

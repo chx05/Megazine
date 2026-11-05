@@ -15,10 +15,13 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="megazine_test.c">
+    <ClCompile Include="megazine_test.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="megazine_engine.h">
+    <ClCompile Include="megazine_engine.hpp">
+      <Filter>Header Files</Filter>
+    </ClCompile>
+    <ClCompile Include="megazine_engine.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

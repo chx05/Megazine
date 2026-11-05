@@ -15,7 +15,9 @@ struct db_handle
 
 int main()
 {
-    auto db = Db::open("test");
+    auto db = Db();
+
+    db.open("test");
     DEFER_close(db);
 
     {
