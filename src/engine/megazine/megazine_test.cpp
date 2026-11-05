@@ -1,12 +1,12 @@
-#include <stdio.h>
-#include "megazine_engine.h"
+#include <iostream>
+#include "megazine_engine.hpp"
 
-void fatal(char const* msg)
-{
-    printf("Fatal: %s", msg);
-    abort();
-}
-
+// this is what a fat pointer should look like
+// when stored in the db
+// we can't store real pointers because they invalidate
+// after the program reopens.
+// so we store relative offsets.
+// they are then converted to page index and internal-to-the-page offset
 struct db_handle
 {
     uint64_t offset;
@@ -15,22 +15,22 @@ struct db_handle
 
 int main()
 {
-    struct db db;
-    if (!open_db(&db, "test"))
-        fatal("cannot open/create db");
+    auto db = Db::open("test");
+    DEFER_close(db);
 
-    struct read_transaction trx = begin_read_transaction(&db);
     {
-        for (uint64_t i = 0; i < trx.diff_buffer.used_map_capacity; i++)
+        auto trx = db.trx_r();
+        DEFER_close(trx);
+
+        for (uint64_t i = 0; i < trx.pages_count(); i++)
         {
-            uint8_t const* page_content = get_page(&trx, i);
-            printf("%llu:\t%.*s\n", i, PAGE_SIZE, page_content);
+            uint8_t const* page_content = trx.get_page(i);
+            std::cout << i << ":\t" << std::string_view((char const*)page_content, PAGE_SIZE) << '\n';
 
             uint64_t const* page_content_128bit = (uint64_t const*)page_content;
-            printf("\t%llu|%llu\n\n", page_content_128bit[0], page_content_128bit[1]);
+            std::cout << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
         }
     }
-    end_read_transaction(&trx);
 
     // unsafe page add
     {

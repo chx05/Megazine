@@ -1,5 +1,4 @@
-﻿  Scanning sources for module dependencies...
-  megazine_test.c
+﻿  megazine_engine.hpp
   megazine.vcxproj -> C:\Users\junio\temp\megazine\src\engine\megazine\x64\Debug\megazine.exe
   'pwsh.exe' is not recognized as an internal or external command,
   operable program or batch file.
