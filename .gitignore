@@ -2,3 +2,5 @@
 *.exe
 .vscode/
 .vs/
+/src/engine/megazine/megazine
+/src/engine/megazine/x64
