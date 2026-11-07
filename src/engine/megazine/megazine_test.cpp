@@ -1,4 +1,6 @@
 #include <iostream>
+#include <syncstream>
+#include <thread>
 #include "megazine_engine.hpp"
 
 // this is what a fat pointer should look like
@@ -13,12 +15,38 @@ struct db_handle
     uint64_t len;
 };
 
+static Db db;
+
+void concurrent_fn(uint32_t thread_id)
+{
+    auto trx = db.trx_r();
+    DEFER_close(trx);
+
+    for (uint64_t i = 0; i < trx.pages_count(); i++)
+    {
+        uint8_t const* page_content = trx.get_page(i);
+        uint64_t const* page_content_128bit = (uint64_t const*)page_content;
+
+        std::osyncstream(std::cout)
+            << "[thread " << thread_id << "] "
+            << i << ":\t"
+            << std::string_view((char const*)page_content, PAGE_SIZE) << '\n'
+            << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
+    }
+}
+
 int main()
 {
-    auto db = Db();
-
     db.open("test");
     DEFER_close(db);
+
+    {
+        /*std::thread t1(concurrent_fn, 1);
+        std::thread t2(concurrent_fn, 2);
+
+        t1.join();
+        t2.join();*/
+    }
 
     {
         auto trx = db.trx_r();
@@ -32,6 +60,20 @@ int main()
             uint64_t const* page_content_128bit = (uint64_t const*)page_content;
             std::cout << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
         }
+    }
+
+    {
+        /*auto trx = db.trx_w();
+        DEFER_close(trx);
+
+        for (uint64_t i = 0; i < trx.pages_count(); i++)
+        {
+            uint8_t const* page_content = trx.get_page(i);
+            std::cout << i << ":\t" << std::string_view((char const*)page_content, PAGE_SIZE) << '\n';
+
+            uint64_t const* page_content_128bit = (uint64_t const*)page_content;
+            std::cout << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
+        }*/
     }
 
     // unsafe page add

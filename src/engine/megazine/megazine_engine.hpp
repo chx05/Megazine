@@ -203,14 +203,14 @@ struct StableArena
 	uint32_t capacity_per_node = 0;
 	StableArenaBufferNode<T>* last_node = nullptr;
 
-	void init(uint32_t initial_capacity)
+	void init(uint32_t capacity_per_node)
 	{
-		assert(initial_capacity > 0);
-		capacity_per_node = initial_capacity;
+		assert(capacity_per_node > 0);
+		this->capacity_per_node = capacity_per_node;
 
 		last_node = new StableArenaBufferNode<T>{
 			.len = 0,
-			.buffer = new T[initial_capacity],
+			.buffer = new T[capacity_per_node],
 			.previous_node = nullptr
 		};
 	}
@@ -255,21 +255,21 @@ struct StableArena
 };
 
 
-struct SharedArenaBufferNode
+struct SharedStableArena_BufferNode
 {
 	std::atomic<uint32_t> len{ 0 };
 	uint8_t* buffer = nullptr;
-	SharedArenaBufferNode* previous_node = nullptr;
+	SharedStableArena_BufferNode* previous_node = nullptr;
 };
 
-struct SharedArena
+struct SharedStableArena
 {
 	uint32_t capacity_per_node = 0;
-	std::atomic<SharedArenaBufferNode*> last_node{ nullptr };
+	std::atomic<SharedStableArena_BufferNode*> last_node{ nullptr };
 
 	void init(uint32_t initial_capacity)
 	{
-		auto* first_node = new SharedArenaBufferNode{
+		auto* first_node = new SharedStableArena_BufferNode{
 			.len = { 0 },
 			.buffer = new uint8_t[initial_capacity],
 			.previous_node = nullptr
@@ -303,14 +303,14 @@ struct SharedArena
 			// allocate in last_node if there is space
 			while (offset + requested_size <= capacity_per_node)
 			{
-				if (node->len.compare_exchange_weak(offset, offset + requested_size, std::memory_order_relaxed))
+				if (node->len.compare_exchange_weak(/*by ref*/ offset, offset + requested_size, std::memory_order_relaxed))
 				{
 					return &node->buffer[offset];
 				}
 			}
 
 			// last_node full, allocate a new one
-			auto* new_node = new SharedArenaBufferNode{
+			auto* new_node = new SharedStableArena_BufferNode{
 				.len = { 0 },
 				// TODO
 				// take in input a per-thread custom allocator instead
@@ -340,7 +340,7 @@ struct SharedArena
 
 struct SharedPagedBuffer
 {
-	SharedArena arena{};
+	SharedStableArena arena{};
 	PagesMap map{};
 
 	void init(uint64_t file_size)
@@ -366,9 +366,12 @@ struct SharedPagedBuffer
 	}
 };
 
-struct SharedReadonlyPagedBuffer
+struct Root
 {
 	SharedPagedBuffer paged_buffer{};
+	// TODO
+	// replace refcounting with epoch based cleanup
+	// so that readers can be more cache friendly
 	refcounter_t refc{ 0 };
 
 	void init(uint64_t file_size)
@@ -379,16 +382,13 @@ struct SharedReadonlyPagedBuffer
 	void drop()
 	{
 		paged_buffer.drop();
+		refc.store(0, std::memory_order_release);
 	}
 };
 
-using root_t = SharedReadonlyPagedBuffer;
-
-struct Db;
 struct TrxR
 {
-	Db* db_ref;
-	root_t* root = nullptr;
+	Root* root = nullptr;
 	file_descriptor_t fd = INVALID_HANDLE_VALUE;
 
 	void load_page(uint64_t page_index)
@@ -400,26 +400,26 @@ struct TrxR
 
 	uint8_t const* get_page(uint64_t page_index)
 	{
-		auto& flag = root->paged_buffer.map.flags[page_index];
+		auto flag = &root->paged_buffer.map.flags[page_index];
 
-		// already loaded?
-		uint8_t current = flag.load(std::memory_order_acquire);
+		// already in cache?
+		uint8_t current = flag->load(std::memory_order_acquire);
 		if (current >= PAGE_FLAG_LOADED_FOR_READ)
 			return root->paged_buffer.pointer_of(page_index);
 
 		// claiming the job
 		uint8_t expected = PAGE_FLAG_NOT_LOADED;
-		if (flag.compare_exchange_strong(expected, PAGE_FLAG_LOADING, std::memory_order_acquire))
+		if (flag->compare_exchange_strong(expected, PAGE_FLAG_LOADING, std::memory_order_acquire))
 		{
 			load_page(page_index);
-			flag.store(PAGE_FLAG_LOADED_FOR_READ, std::memory_order_release);
-			flag.notify_all(); // Wake up waiting threads
+			flag->store(PAGE_FLAG_LOADED_FOR_READ, std::memory_order_release);
+			flag->notify_all(); // idk, seems standard pattern
 			return root->paged_buffer.pointer_of(page_index);
 		}
 
 		// or waiting for someone who claimed it first to complete the job
-		while (flag.load(std::memory_order_acquire) == PAGE_FLAG_LOADING)
-			flag.wait(PAGE_FLAG_LOADING, std::memory_order_acquire);
+		while (flag->load(std::memory_order_acquire) == PAGE_FLAG_LOADING)
+			flag->wait(PAGE_FLAG_LOADING, std::memory_order_acquire);
 
 		return root->paged_buffer.pointer_of(page_index);
 	}
@@ -429,40 +429,68 @@ struct TrxR
 		return root->paged_buffer.map.count;
 	}
 
+	void close()
+	{
+		if (root != nullptr)
+			root->refc--;
+	}
+};
+
+struct Db;
+enum struct TrxW_Status { Open, Closed, Aborted };
+struct TrxW
+{
+	Db* db_ref;
+	TrxR trx_r{};
+	Root* new_root = nullptr;
+
+	TrxW_Status status = TrxW_Status::Open;
+
+	uint64_t pages_count() const
+	{
+		return new_root->paged_buffer.map.count;
+	}
+
+	void abort();
 	void close();
 };
 
+// TODO
+// as long as only one write transaction is allowed, alloc_root is ok
+// but it's not thread safe right now so this must be changed for concurrent writers
 struct RootsPool
 {
-	StableArena<root_t> pool{};
-	Arena<root_t*> free_slots{};
+	StableArena<Root> pool{};
 
 	void init()
 	{
 		pool.init(INITIAL_ROOTS_POOL_CAPACITY);
-		free_slots.init(INITIAL_ROOTS_POOL_CAPACITY);
 	}
 
 	void drop()
 	{
 		pool.drop();
-		free_slots.drop();
 	}
 
-	root_t* alloc_root()
+	Root* alloc_root()
 	{
-		if (free_slots.count > 0)
+		auto node = pool.last_node;
+		while (node != nullptr)
 		{
-			free_slots.count--;
-			return free_slots.buffer[free_slots.count];
+			for (uint32_t i = 0; i < node->len; i++)
+			{
+				auto root_ref = &node->buffer[i];
+				if (root_ref->refc.load(std::memory_order_acquire) == 0)
+				{
+					root_ref->drop(); // cleanup first
+					return root_ref;
+				}
+			}
+
+			node = node->previous_node;
 		}
 
 		return pool.alloc_many(1);
-	}
-
-	void free_root(root_t* root)
-	{
-		*free_slots.alloc_many(1) = root;
 	}
 };
 
@@ -471,8 +499,11 @@ struct Db
 	char const* filename = nullptr;
 	file_descriptor_t fd = INVALID_HANDLE_VALUE;
 	uint64_t file_size = 0;
+	// TODO
+	// if only one writer transaction is allowed
+	// then probably no pool is needed, just a 2 element swap
 	RootsPool roots_pool{};
-	std::atomic<root_t*> root{ 0 };
+	std::atomic<Root*> root{ 0 };
 
 	void open(char const* db_filename)
 	{
@@ -494,6 +525,7 @@ struct Db
 		roots_pool.init();
 		auto first_root = roots_pool.alloc_root();
 		first_root->init(file_size);
+		first_root->refc.store(1, std::memory_order_release);
 
 		root.store(first_root, std::memory_order_release);
 	}
@@ -514,20 +546,59 @@ struct Db
 		return fd != INVALID_HANDLE_VALUE;
 	}
 
-	TrxR trx_r()
+	TrxR trx_r() const
 	{
-		auto rtx_root = root.load(std::memory_order_acquire);
-		rtx_root->refc++;
-		return TrxR{ .db_ref = this, .root = rtx_root, .fd = fd};
+		while (true)
+		{
+			auto* r = root.load(std::memory_order_acquire);
+			uint64_t count = r->refc.load(std::memory_order_relaxed);
+
+			// increment only if not already 0
+			while (count > 0 && !r->refc.compare_exchange_weak(count, count + 1, std::memory_order_acq_rel))
+			{
+				// nothing
+			}
+
+			if (count == 0)
+				continue; // someone is dropping the root, retry with updated root
+
+			// if root hasn't been replaced while incrementing
+			if (root.load(std::memory_order_acquire) == r)
+				return TrxR{ .root = r, .fd = fd };
+
+			// if it was replaced mid flight, undo refcount
+			r->refc--;
+		}
+	}
+
+	TrxW trx_w()
+	{
+		auto new_root = roots_pool.alloc_root();
+		new_root->init(file_size);
+		new_root->refc.store(1, std::memory_order_release);
+		return TrxW{ .db_ref = this, .trx_r = trx_r(), .new_root = new_root };
 	}
 };
 
-inline void TrxR::close()
+inline void TrxW::abort()
 {
-	if (root != nullptr && --root->refc == 0 && db_ref->root.load(std::memory_order_relaxed) != root)
+	if (status == TrxW_Status::Open)
 	{
-		root->drop();
-		root = nullptr;
+		status = TrxW_Status::Aborted;
+		trx_r.close();
+		new_root->drop();
+	}
+}
+
+inline void TrxW::close()
+{
+	if (status == TrxW_Status::Open)
+	{
+		status = TrxW_Status::Closed;
+		trx_r.close();
+		
+		auto old_root = db_ref->root.exchange(new_root, std::memory_order_acq_rel);
+		old_root->refc--;
 	}
 }
 
