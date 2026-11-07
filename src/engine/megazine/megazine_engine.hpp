@@ -383,6 +383,11 @@ struct Root
 	void drop()
 	{
 		paged_buffer.drop();
+	}
+
+	void drop_and_decrement_refc()
+	{
+		drop();
 		refc--;
 	}
 };
@@ -591,7 +596,7 @@ inline void TrxW::abort()
 	{
 		status = TrxW_Status::Aborted;
 		trx_r.close();
-		new_root->drop();
+		new_root->drop_and_decrement_refc();
 	}
 }
 
