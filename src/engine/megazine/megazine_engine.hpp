@@ -377,12 +377,13 @@ struct Root
 	void init(uint64_t file_size)
 	{
 		paged_buffer.init(file_size);
+		refc.store(1, std::memory_order_release);
 	}
 
 	void drop()
 	{
 		paged_buffer.drop();
-		refc.store(0, std::memory_order_release);
+		refc--;
 	}
 };
 
@@ -432,7 +433,10 @@ struct TrxR
 	void close()
 	{
 		if (root != nullptr)
+		{
 			root->refc--;
+			root = nullptr;
+		}
 	}
 };
 
@@ -482,6 +486,9 @@ struct RootsPool
 				auto root_ref = &node->buffer[i];
 				if (root_ref->refc.load(std::memory_order_acquire) == 0)
 				{
+					// TODO
+					// find some clever way to cleanup ALL dead roots instead of just the chosen one
+					// and to do it even without creating a write transaction
 					root_ref->drop(); // cleanup first
 					return root_ref;
 				}
@@ -525,7 +532,6 @@ struct Db
 		roots_pool.init();
 		auto first_root = roots_pool.alloc_root();
 		first_root->init(file_size);
-		first_root->refc.store(1, std::memory_order_release);
 
 		root.store(first_root, std::memory_order_release);
 	}
@@ -575,7 +581,6 @@ struct Db
 	{
 		auto new_root = roots_pool.alloc_root();
 		new_root->init(file_size);
-		new_root->refc.store(1, std::memory_order_release);
 		return TrxW{ .db_ref = this, .trx_r = trx_r(), .new_root = new_root };
 	}
 };
