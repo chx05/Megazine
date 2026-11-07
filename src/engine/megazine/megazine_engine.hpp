@@ -98,6 +98,7 @@ inline bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void
 	return ok && (bytes == PAGE_SIZE);
 }
 
+// TODO this must be ported to async as well like read_page_from_file
 inline bool write_page_to_file(file_descriptor_t fd, uint64_t file_offset, void const* source_buffer)
 {
 	OVERLAPPED ov = { 0 };
@@ -494,7 +495,7 @@ struct Db
 		auto first_root = roots_pool.alloc_root();
 		first_root->init(file_size);
 
-		root.store(first_root, std::memory_order_acquire);
+		root.store(first_root, std::memory_order_release);
 	}
 
 	void close()
