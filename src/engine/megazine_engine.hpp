@@ -7,6 +7,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cassert>
+#include <memory>
 
 // TODO
 // try using mmap() for lazy loading instead, the mutex and all the stuff
@@ -163,7 +164,22 @@ struct __DeferredCloser
 #define DEFER_DROP(target)  auto CONCAT(_defer_drop_, __COUNTER__)  = __DeferredDropper(target)
 
 
-using page_flag_t = PotentiallyAtomic<uint8_t>;
+enum struct Reader_PageFlag : uint8_t
+{
+	// these 2 must be equal to Writer_PageFlag::no_diff/diff (see TrxW::close)
+	not_loaded = 0,
+	loaded = 1,
+
+	loading = 2,
+};
+
+enum struct Writer_PageFlag : uint8_t
+{
+	// these 2 must be equal to Reader_PageFlag::not_loaded/loaded (see TrxW::close)
+	no_diff = 0,
+	diff = 1,
+};
+
 using refcounter_t = PotentiallyAtomic<uint64_t>;
 using file_descriptor_t = HANDLE;
 // points to chunk of contiguous memory with length PAGE_SIZE
@@ -171,12 +187,8 @@ using page_ref_t = uint8_t*;
 
 constexpr uint64_t PAGE_SIZE = 16;
 constexpr uint64_t INITIAL_MIN_PAGES_COUNT = 10;
+constexpr uint64_t INITIAL_MIN_DIFF_PAGES_COUNT = 10;
 constexpr uint64_t INITIAL_ROOTS_POOL_CAPACITY = 5;
-
-constexpr uint8_t PAGE_FLAG_NOT_LOADED = 0;
-constexpr uint8_t PAGE_FLAG_LOADING = 1;
-constexpr uint8_t PAGE_FLAG_LOADED_FOR_READ = 2;
-constexpr uint8_t PAGE_FLAG_LOADED_FOR_WRITE = 3;
 
 inline bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void* dest_buffer)
 {
@@ -213,47 +225,6 @@ inline bool write_page_to_file(file_descriptor_t fd, uint64_t file_offset, void 
 	return WriteFile(fd, source_buffer, (DWORD)PAGE_SIZE, &bytes, &ov);
 }
 
-// TODO
-// be cautious when resizing this
-// the realloc must be followed by a memset of the new blank cells to page_flag_not_loaded
-struct PagesMap
-{
-	uint64_t count;
-	uint64_t capacity;
-	page_ref_t* array;
-	page_flag_t* flags;
-
-	static PagesMap create(uint64_t file_size)
-	{
-		uint64_t count = file_size / PAGE_SIZE;
-		// TODO this could theoretically go away if used only for reader transactions
-		uint64_t capacity = std::max(count, INITIAL_MIN_PAGES_COUNT);
-		auto* array = new page_ref_t[capacity];
-		auto* flags = new page_flag_t[capacity];
-
-		// TODO memset should be safe here
-		for (uint64_t i = 0; i < capacity; ++i)
-			flags[i].store_relaxed(PAGE_FLAG_NOT_LOADED);
-
-		return {
-			.count = count,
-			.capacity = capacity,
-			.array = array,
-			.flags = flags,
-		};
-	}
-
-	void drop()
-	{
-		delete[] array;
-		delete[] flags;
-		array = nullptr;
-		flags = nullptr;
-		count = 0;
-		capacity = 0;
-	}
-};
-
 template<typename T>
 struct Arena
 {
@@ -286,7 +257,7 @@ struct Arena
 
 			capacity = std::max(capacity * 2, capacity + incoming_count);
 			auto new_buffer = new T[capacity];
-			memcpy(new_buffer, old_buffer, count); // this is bypassing RAII, which is good in this code base
+			std::copy_n(old_buffer, count, new_buffer);
 			buffer = new_buffer;
 
 			delete[] old_buffer;
@@ -300,6 +271,9 @@ struct Arena
 		count += requested_count;
 		return &buffer[start];
 	}
+
+	T& operator[](uint64_t index) { return buffer[index]; }
+	const T& operator[](uint64_t index) const { return buffer[index]; }
 };
 
 
@@ -420,16 +394,89 @@ struct StableArena
 };
 
 
+// concurrent mapping of page_index -> page content ptr
+// designed for reader-transactions
+struct Reader_PageMap
+{
+	uint64_t count;
+	page_ref_t* refs;
+	PotentiallyAtomic<Reader_PageFlag>* flags;
+
+	static Reader_PageMap create(uint64_t file_size)
+	{
+		uint64_t count = file_size / PAGE_SIZE;
+		auto refs = new page_ref_t[count];
+		auto flags = new PotentiallyAtomic<Reader_PageFlag>[count];
+
+		//std::fill_n(flags, count, PotentiallyAtomic<Reader_PageFlag>::create(Reader_PageFlag::not_loaded));
+		for (uint64_t i = 0; i < count; i++)
+			flags[i] = PotentiallyAtomic<Reader_PageFlag>::create(Reader_PageFlag::not_loaded);
+
+		return {
+			.count = count,
+			.refs = refs,
+			.flags = flags,
+		};
+	}
+
+	void drop()
+	{
+		delete[] refs;
+		delete[] flags;
+		refs = nullptr;
+		flags = nullptr;
+		count = 0;
+	}
+};
+
+// single threaded only
+// resizable and isolated from the one in trx_r(), but it's a 1:1
+// designed for writer-transactions
+struct Writer_PageMap
+{
+	Arena<page_ref_t> refs;
+	// TODO
+	// when this becomes resizable
+	// remember to default the new resized space to PAGE_FLAG_NOT_LOADED
+	Arena<Writer_PageFlag> flags;
+
+	static Writer_PageMap from(uint64_t file_size)
+	{
+		uint64_t initial_capacity = file_size / PAGE_SIZE;
+
+		auto refs = Arena<page_ref_t>::create(initial_capacity);
+		refs.count = initial_capacity;
+
+		auto flags = Arena<Writer_PageFlag>::create(initial_capacity);
+		flags.count = initial_capacity;
+
+		//std::fill_n(flags, flags.count, Writer_PageFlag::no_diff);
+		for (uint64_t i = 0; i < flags.count; i++)
+			flags[i] = Writer_PageFlag::no_diff;
+
+		return {
+			.refs = refs,
+			.flags = flags,
+		};
+	}
+
+	void drop()
+	{
+		refs.drop();
+		flags.drop();
+	}
+};
+
 struct PagedBuffer
 {
 	StableArena<uint8_t> arena;
-	PagesMap map;
+	Reader_PageMap map;
 
 	static PagedBuffer create(uint64_t file_size)
 	{
 		return {
 			.arena = StableArena<uint8_t>::create(PAGE_SIZE * INITIAL_MIN_PAGES_COUNT),
-			.map = PagesMap::create(file_size),
+			.map = Reader_PageMap::create(file_size),
 		};
 	}
 
@@ -441,17 +488,52 @@ struct PagedBuffer
 
 	void concurrent_alloc_and_map_page(uint64_t page_index)
 	{
-		map.array[page_index] = (page_ref_t)arena.concurrent_alloc_many(PAGE_SIZE);
+		map.refs[page_index] = (page_ref_t)arena.concurrent_alloc_many(PAGE_SIZE);
 	}
 
 	void non_concurrent_alloc_and_map_page(uint64_t page_index)
 	{
-		map.array[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(PAGE_SIZE);
+		map.refs[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(PAGE_SIZE);
 	}
 
-	uint8_t* pointer_of(uint64_t page_index)
+	uint8_t const* pointer_of(uint64_t page_index)
 	{
-		return map.array[page_index];
+		return map.refs[page_index];
+	}
+};
+
+struct DiffBuffer
+{
+	StableArena<uint8_t> arena;
+	Writer_PageMap map;
+
+	static DiffBuffer create(uint64_t file_size)
+	{
+		return {
+			.arena = StableArena<uint8_t>::create(PAGE_SIZE * INITIAL_MIN_DIFF_PAGES_COUNT),
+			.map = Writer_PageMap::from(file_size),
+		};
+	}
+
+	void drop()
+	{
+		arena.drop();
+		map.drop();
+	}
+
+	void alloc_and_map_page(uint64_t page_index)
+	{
+		map.refs[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(PAGE_SIZE);
+	}
+
+	uint8_t const* pointer_of(uint64_t page_index)
+	{
+		return map.refs[page_index];
+	}
+
+	uint8_t* mut_pointer_of(uint64_t page_index)
+	{
+		return map.refs[page_index];
 	}
 };
 
@@ -492,7 +574,7 @@ struct TrxR
 	{
 		root->paged_buffer.concurrent_alloc_and_map_page(page_index);
 		uint64_t file_offset = page_index * PAGE_SIZE;
-		read_page_from_file(fd, file_offset, root->paged_buffer.pointer_of(page_index));
+		read_page_from_file(fd, file_offset, (void*)root->paged_buffer.pointer_of(page_index));
 	}
 
 	uint8_t const* get_page(uint64_t page_index)
@@ -500,23 +582,23 @@ struct TrxR
 		auto flag = &root->paged_buffer.map.flags[page_index];
 
 		// already in cache?
-		uint8_t current = flag->acquire();
-		if (current >= PAGE_FLAG_LOADED_FOR_READ)
+		auto current = flag->acquire();
+		if (current == Reader_PageFlag::loaded)
 			return root->paged_buffer.pointer_of(page_index);
 
 		// claiming the job
-		uint8_t expected = PAGE_FLAG_NOT_LOADED;
-		if (flag->cas_strong_acquire(&expected, PAGE_FLAG_LOADING))
+		auto expected = Reader_PageFlag::not_loaded;
+		if (flag->cas_strong_acquire(&expected, Reader_PageFlag::loading))
 		{
 			load_page(page_index);
-			flag->release(PAGE_FLAG_LOADED_FOR_READ);
+			flag->release(Reader_PageFlag::loaded);
 			flag->notify_all(); // idk, seems standard pattern
 			return root->paged_buffer.pointer_of(page_index);
 		}
 
 		// or waiting for someone who claimed it first to complete the job
-		while (flag->acquire() == PAGE_FLAG_LOADING)
-			flag->wait(PAGE_FLAG_LOADING);
+		while (flag->acquire() == Reader_PageFlag::loading)
+			flag->wait(Reader_PageFlag::loading);
 
 		return root->paged_buffer.pointer_of(page_index);
 	}
@@ -545,26 +627,38 @@ struct TrxW
 	Db* db_ref;
 	TrxR trx_r;
 
-	Root* new_root;
-	PagedBuffer diffs;
+	DiffBuffer diffs;
 
-	static TrxW create(Db* db_ref, TrxR trx_r, Root* new_root);
+	static TrxW create(Db* db_ref, TrxR trx_r);
 
 	uint64_t pages_count() const
 	{
-		return new_root->paged_buffer.map.count;
+		return diffs.map.refs.count;
 	}
 
 	uint8_t const* get_page(uint64_t page_index)
 	{
-		(void)page_index;
-		return nullptr;
+		auto flag = diffs.map.flags[page_index];
+		if (flag == Writer_PageFlag::diff)
+			return diffs.map.refs[page_index];
+
+		return trx_r.get_page(page_index);
 	}
 
 	uint8_t* get_mut_page(uint64_t page_index)
 	{
-		(void)page_index;
-		return nullptr;
+		auto flag = diffs.map.flags[page_index];
+		if (flag == Writer_PageFlag::diff)
+			return diffs.map.refs[page_index];
+
+		auto real_page = trx_r.get_page(page_index);
+
+		diffs.alloc_and_map_page(page_index);
+		auto diff_page = diffs.mut_pointer_of(page_index);
+		std::copy_n(real_page, PAGE_SIZE, diff_page);
+		diffs.map.flags[page_index] = Writer_PageFlag::diff;
+
+		return diff_page;
 	}
 
 	void abort();
@@ -602,7 +696,9 @@ struct RootsPool
 				{
 					// TODO
 					// find some clever way to cleanup ALL dead roots instead of just the chosen one
-					// and to do it even without creating a write transaction
+					// and to do it even without creating a write transaction.
+					// for example freed roots should be put in a list
+					// and the list used here instead of the cleanup
 					root_ref->drop(); // cleanup first
 					return root_ref;
 				}
@@ -698,22 +794,18 @@ struct Db
 
 	TrxW trx_w()
 	{
-		auto new_root = roots_pool.alloc_root();
-		*new_root = Root::create(file_size);
-
-		return TrxW::create(this, trx_r(), new_root);
+		return TrxW::create(this, trx_r());
 	}
 };
 
 
-inline TrxW TrxW::create(Db* db_ref, TrxR trx_r, Root* new_root)
+inline TrxW TrxW::create(Db* db_ref, TrxR trx_r)
 {
 	return {
 		.status = TrxW_Status::Open,
 		.db_ref = db_ref,
 		.trx_r = trx_r,
-		.new_root = new_root,
-		.diffs = PagedBuffer::create(db_ref->file_size),
+		.diffs = DiffBuffer::create(db_ref->file_size),
 	};
 }
 
@@ -723,7 +815,7 @@ inline void TrxW::abort()
 	{
 		status = TrxW_Status::Aborted;
 		trx_r.close();
-		new_root->drop_and_decrement_refc();
+		diffs.drop();
 	}
 }
 
@@ -732,10 +824,28 @@ inline void TrxW::close()
 	if (status == TrxW_Status::Open)
 	{
 		status = TrxW_Status::Closed;
-		trx_r.close();
+
+		auto new_file_size = pages_count() * PAGE_SIZE;
+		auto new_root = db_ref->roots_pool.alloc_root();
+		*new_root = Root::create(new_file_size);
+
+		//std::copy_n(diffs.map.flags.buffer, diffs.map.flags.count, new_root->paged_buffer.map.flags);
+		for (uint64_t i = 0; i < diffs.map.flags.count; i++)
+		{
+			// this can be done thanks to Writer_PageFlag/Reader_PageFlag declaration
+			auto writer_flag = diffs.map.flags[i];
+			auto reader_flag = (Reader_PageFlag)writer_flag;
+			// the contents should be copied as well
+			// but at this point just don't call drop of diffs.arena
+			// also, in theory it should be possible to do no clones at all here
+			// moving all diffs buffers to new_root, since theirs layouts are very similar
+			(void)reader_flag;
+		}
 
 		auto old_root = db_ref->root.swap_acquire_release(new_root);
 		old_root->refc.decrement();
+
+		diffs.drop();
 	}
 }
 

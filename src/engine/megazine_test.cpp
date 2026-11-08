@@ -55,10 +55,12 @@ int main()
         for (uint64_t i = 0; i < trx.pages_count(); i++)
         {
             uint8_t const* page_content = trx.get_page(i);
-            std::cout << i << ":\t" << std::string_view((char const*)page_content, PAGE_SIZE) << '\n';
-
             uint64_t const* page_content_128bit = (uint64_t const*)page_content;
-            std::cout << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
+            
+            std::osyncstream(std::cout)
+                << i << ":\t"
+                << std::string_view((char const*)page_content, PAGE_SIZE) << '\n'
+                << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
         }
     }
 
