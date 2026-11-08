@@ -105,13 +105,13 @@ struct PotentiallyAtomic
 		get_as_atomic()--;
 	}
 
-	T* get_ref()
-	{
-		return &value;
-	}
 
-	T get() const
-	{
+	// for non atomic usage:
+
+	T& raw() noexcept { return value; }
+	const T& raw() const noexcept { return value; }
+
+	T operator->() const noexcept requires std::is_pointer_v<T> {
 		return value;
 	}
 };
@@ -332,8 +332,13 @@ struct StableArena
 		{
 			// if .drop() is avaiable, i call it
 			if constexpr (requires { node->buffer[0].drop(); }) {
-				for (uint32_t i = 0; i < node->len.get(); i++)
+				for (uint32_t i = 0; i < node->len.raw(); i++)
 					node->buffer[i].drop();
+			}
+			// if it is available but with wrong signature, print error instead of silent ignore
+			else if constexpr (requires { &T::drop; }) {
+				static_assert(dependent_false<T>,
+					"T has a member named 'drop', but it cannot be called as obj.drop()");
 			}
 
 			auto* prev = node->previous_node;
@@ -388,25 +393,22 @@ struct StableArena
 
 	T* non_concurrent_alloc_many(uint32_t requested_count)
 	{
-		auto last_node_ref = last_node.get_ref();
 		assert(requested_count <= capacity_per_node);
-		assert(*last_node_ref != nullptr);
+		assert(last_node.raw() != nullptr);
 
 		// full node: link a new node
-		if ((*last_node_ref)->len.get() + requested_count > capacity_per_node)
+		if (last_node->len.raw() + requested_count > capacity_per_node)
 		{
 			last_node = PotentiallyAtomic<StableArena_BufferNode<T>*>::create(new StableArena_BufferNode<T>{
 				.len = 0,
 				.buffer = new T[capacity_per_node],
-				.previous_node = *last_node_ref
+				.previous_node = last_node.raw()
 			});
-			last_node_ref = last_node.get_ref();
 		}
 
 		// allocates on node
-		auto len_ref = (*last_node_ref)->len.get_ref();
-		auto ptr = &(*last_node_ref)->buffer[*len_ref];
-		*len_ref += requested_count;
+		auto ptr = &last_node->buffer[last_node->len.raw()];
+		last_node->len.raw() += requested_count;
 		return ptr;
 	}
 };
@@ -584,10 +586,10 @@ struct RootsPool
 
 	Root* alloc_root()
 	{
-		auto node = pool.last_node.get();
+		auto node = pool.last_node.raw();
 		while (node != nullptr)
 		{
-			for (uint32_t i = 0; i < node->len.get(); i++)
+			for (uint32_t i = 0; i < node->len.raw(); i++)
 			{
 				auto root_ref = &node->buffer[i];
 				if (root_ref->refc.acquire() == 0)
