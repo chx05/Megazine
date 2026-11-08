@@ -20,6 +20,31 @@
 
 
 template<typename T>
+struct Atomic : std::atomic<T>
+{
+	using std::atomic<T>::atomic;
+
+	constexpr Atomic() noexcept : std::atomic<T>(T{}) {}
+	constexpr Atomic(T val) noexcept : std::atomic<T>(val) {}
+
+	Atomic(const Atomic& other) noexcept
+		: std::atomic<T>(other.load(std::memory_order_relaxed)) {}
+
+	Atomic& operator=(const Atomic& other) noexcept
+	{
+		this->store(other.load(std::memory_order_relaxed), std::memory_order_relaxed);
+		return *this;
+	}
+
+	Atomic& operator=(T val) noexcept
+	{
+		this->store(val, std::memory_order_relaxed);
+		return *this;
+	}
+};
+
+
+template<typename T>
 struct __DeferredDropper
 {
 	T& value;
@@ -59,8 +84,8 @@ struct __DeferredCloser
 #define DEFER_DROP(target)  auto CONCAT(_defer_drop_, __COUNTER__)  = __DeferredDropper(target)
 
 
-using page_flag_t = std::atomic<uint8_t>;
-using refcounter_t = std::atomic<uint64_t>;
+using page_flag_t = Atomic<uint8_t>;
+using refcounter_t = Atomic<uint64_t>;
 using file_descriptor_t = HANDLE;
 // points to chunk of contiguous memory with length PAGE_SIZE
 using page_ref_t = uint8_t*;
@@ -114,22 +139,29 @@ inline bool write_page_to_file(file_descriptor_t fd, uint64_t file_offset, void 
 // the realloc must be followed by a memset of the new blank cells to page_flag_not_loaded
 struct PagesMap
 {
-	uint64_t count = 0;
-	uint64_t capacity = 0;
-	page_ref_t* array = nullptr;
-	page_flag_t* flags = nullptr;
+	uint64_t count;
+	uint64_t capacity;
+	page_ref_t* array;
+	page_flag_t* flags;
 
-	void init(uint64_t file_size)
+	static PagesMap create(uint64_t file_size)
 	{
-		count = file_size / PAGE_SIZE;
+		uint64_t count = file_size / PAGE_SIZE;
 		// TODO this could theoretically go away if used only for reader transactions
-		capacity = std::max(count, INITIAL_MIN_PAGES_COUNT);
-		array = new page_ref_t[capacity];
-		flags = new page_flag_t[capacity];
+		uint64_t capacity = std::max(count, INITIAL_MIN_PAGES_COUNT);
+		auto* array = new page_ref_t[capacity];
+		auto* flags = new page_flag_t[capacity];
 
 		// TODO memset should be safe here
 		for (uint64_t i = 0; i < capacity; ++i)
 			flags[i].store(PAGE_FLAG_NOT_LOADED, std::memory_order_relaxed);
+
+		return {
+			.count = count,
+			.capacity = capacity,
+			.array = array,
+			.flags = flags,
+		};
 	}
 
 	void drop()
@@ -146,15 +178,17 @@ struct PagesMap
 template<typename T>
 struct Arena
 {
-	uint64_t count = 0;
-	uint64_t capacity = 0;
-	T* buffer = nullptr;
+	uint64_t count;
+	uint64_t capacity;
+	T* buffer;
 
-	void init(uint64_t initial_capacity)
+	static Arena create(uint64_t initial_capacity)
 	{
-		count = 0;
-		capacity = initial_capacity;
-		buffer = new T[initial_capacity];
+		return {
+			.count = 0,
+			.capacity = initial_capacity,
+			.buffer = new T[initial_capacity],
+		};
 	}
 
 	void drop()
@@ -192,26 +226,27 @@ struct Arena
 template<typename T>
 struct StableArenaBufferNode
 {
-	uint32_t len = 0;
-	T* buffer = nullptr;
-	StableArenaBufferNode* previous_node = nullptr;
+	uint32_t len;
+	T* buffer;
+	StableArenaBufferNode* previous_node;
 };
 
 template<typename T>
 struct StableArena
 {
-	uint32_t capacity_per_node = 0;
-	StableArenaBufferNode<T>* last_node = nullptr;
+	uint32_t capacity_per_node;
+	StableArenaBufferNode<T>* last_node;
 
-	void init(uint32_t capacity_per_node)
+	static StableArena create(uint32_t max_capacity_per_node)
 	{
-		assert(capacity_per_node > 0);
-		this->capacity_per_node = capacity_per_node;
-
-		last_node = new StableArenaBufferNode<T>{
-			.len = 0,
-			.buffer = new T[capacity_per_node],
-			.previous_node = nullptr
+		assert(max_capacity_per_node > 0);
+		return {
+			.capacity_per_node = max_capacity_per_node,
+			.last_node = new StableArenaBufferNode<T>{
+				.len = 0,
+				.buffer = new T[max_capacity_per_node],
+				.previous_node = nullptr,
+			},
 		};
 	}
 
@@ -257,26 +292,28 @@ struct StableArena
 
 struct SharedStableArena_BufferNode
 {
-	std::atomic<uint32_t> len{ 0 };
-	uint8_t* buffer = nullptr;
-	SharedStableArena_BufferNode* previous_node = nullptr;
+	Atomic<uint32_t> len;
+	uint8_t* buffer;
+	SharedStableArena_BufferNode* previous_node;
 };
 
 struct SharedStableArena
 {
-	uint32_t capacity_per_node = 0;
-	std::atomic<SharedStableArena_BufferNode*> last_node{ nullptr };
+	uint32_t capacity_per_node;
+	Atomic<SharedStableArena_BufferNode*> last_node;
 
-	void init(uint32_t initial_capacity)
+	static SharedStableArena create(uint32_t initial_capacity)
 	{
 		auto* first_node = new SharedStableArena_BufferNode{
-			.len = { 0 },
+			.len = 0,
 			.buffer = new uint8_t[initial_capacity],
-			.previous_node = nullptr
+			.previous_node = nullptr,
 		};
 
-		capacity_per_node = initial_capacity;
-		last_node.store(first_node, std::memory_order_relaxed);
+		return {
+			.capacity_per_node = initial_capacity,
+			.last_node = first_node,
+		};
 	}
 
 	void drop()
@@ -311,7 +348,7 @@ struct SharedStableArena
 
 			// last_node full, allocate a new one
 			auto* new_node = new SharedStableArena_BufferNode{
-				.len = { 0 },
+				.len = 0,
 				// TODO
 				// take in input a per-thread custom allocator instead
 				// and use it to allocate each node's buffer
@@ -340,13 +377,15 @@ struct SharedStableArena
 
 struct SharedPagedBuffer
 {
-	SharedStableArena arena{};
-	PagesMap map{};
+	SharedStableArena arena;
+	PagesMap map;
 
-	void init(uint64_t file_size)
+	static SharedPagedBuffer create(uint64_t file_size)
 	{
-		arena.init(PAGE_SIZE * INITIAL_MIN_PAGES_COUNT);
-		map.init(file_size);
+		return {
+			.arena = SharedStableArena::create(PAGE_SIZE * INITIAL_MIN_PAGES_COUNT),
+			.map = PagesMap::create(file_size),
+		};
 	}
 
 	void drop()
@@ -368,16 +407,18 @@ struct SharedPagedBuffer
 
 struct Root
 {
-	SharedPagedBuffer paged_buffer{};
+	SharedPagedBuffer paged_buffer;
 	// TODO
 	// replace refcounting with epoch based cleanup
 	// so that readers can be more cache friendly
-	refcounter_t refc{ 0 };
+	refcounter_t refc;
 
-	void init(uint64_t file_size)
+	static Root create(uint64_t file_size)
 	{
-		paged_buffer.init(file_size);
-		refc.store(1, std::memory_order_release);
+		return {
+			.paged_buffer = SharedPagedBuffer::create(file_size),
+			.refc = 1,
+		};
 	}
 
 	void drop()
@@ -394,8 +435,8 @@ struct Root
 
 struct TrxR
 {
-	Root* root = nullptr;
-	file_descriptor_t fd = INVALID_HANDLE_VALUE;
+	Root* root;
+	file_descriptor_t fd;
 
 	void load_page(uint64_t page_index)
 	{
@@ -449,15 +490,31 @@ struct Db;
 enum struct TrxW_Status { Open, Closed, Aborted };
 struct TrxW
 {
-	Db* db_ref;
-	TrxR trx_r{};
-	Root* new_root = nullptr;
+	TrxW_Status status;
 
-	TrxW_Status status = TrxW_Status::Open;
+	Db* db_ref;
+	TrxR trx_r;
+
+	Root* new_root;
+	SharedPagedBuffer diffs;
+
+	static TrxW create(Db* db_ref, TrxR trx_r, Root* new_root);
 
 	uint64_t pages_count() const
 	{
 		return new_root->paged_buffer.map.count;
+	}
+
+	uint8_t const* get_page(uint64_t page_index)
+	{
+		(void)page_index;
+		return nullptr;
+	}
+
+	uint8_t* get_mut_page(uint64_t page_index)
+	{
+		(void)page_index;
+		return nullptr;
 	}
 
 	void abort();
@@ -469,11 +526,13 @@ struct TrxW
 // but it's not thread safe right now so this must be changed for concurrent writers
 struct RootsPool
 {
-	StableArena<Root> pool{};
+	StableArena<Root> pool;
 
-	void init()
+	static RootsPool create()
 	{
-		pool.init(INITIAL_ROOTS_POOL_CAPACITY);
+		return {
+			.pool = StableArena<Root>::create(INITIAL_ROOTS_POOL_CAPACITY),
+		};
 	}
 
 	void drop()
@@ -508,19 +567,18 @@ struct RootsPool
 
 struct Db
 {
-	char const* filename = nullptr;
-	file_descriptor_t fd = INVALID_HANDLE_VALUE;
-	uint64_t file_size = 0;
+	char const* filename;
+	file_descriptor_t fd;
+	uint64_t file_size;
 	// TODO
 	// if only one writer transaction is allowed
 	// then probably no pool is needed, just a 2 element swap
-	RootsPool roots_pool{};
-	std::atomic<Root*> root{ 0 };
+	RootsPool roots_pool;
+	Atomic<Root*> root;
 
-	void open(char const* db_filename)
+	static Db open(char const* filename)
 	{
-		filename = db_filename;
-		fd = CreateFileA(
+		auto fd = CreateFileA(
 			filename,
 			GENERIC_READ | GENERIC_WRITE,
 			FILE_SHARE_READ,
@@ -532,13 +590,19 @@ struct Db
 
 		LARGE_INTEGER file_size_result;
 		GetFileSizeEx(fd, &file_size_result);
-		file_size = (uint64_t)file_size_result.QuadPart;
+		auto file_size = (uint64_t)file_size_result.QuadPart;
 
-		roots_pool.init();
-		auto first_root = roots_pool.alloc_root();
-		first_root->init(file_size);
+		auto roots_pool = RootsPool::create();
+		auto root = roots_pool.alloc_root();
+		*root = Root::create(file_size);
 
-		root.store(first_root, std::memory_order_release);
+		return {
+			.filename = filename,
+			.fd = fd,
+			.file_size = file_size,
+			.roots_pool = roots_pool,
+			.root = root
+		};
 	}
 
 	void close()
@@ -585,10 +649,23 @@ struct Db
 	TrxW trx_w()
 	{
 		auto new_root = roots_pool.alloc_root();
-		new_root->init(file_size);
-		return TrxW{ .db_ref = this, .trx_r = trx_r(), .new_root = new_root };
+		*new_root = Root::create(file_size);
+
+		return TrxW::create(this, trx_r(), new_root);
 	}
 };
+
+
+inline TrxW TrxW::create(Db* db_ref, TrxR trx_r, Root* new_root)
+{
+	return {
+		.status = TrxW_Status::Open,
+		.db_ref = db_ref,
+		.trx_r = trx_r,
+		.new_root = new_root,
+		.diffs = SharedPagedBuffer::create(db_ref->file_size),
+	};
+}
 
 inline void TrxW::abort()
 {
@@ -606,7 +683,7 @@ inline void TrxW::close()
 	{
 		status = TrxW_Status::Closed;
 		trx_r.close();
-		
+
 		auto old_root = db_ref->root.exchange(new_root, std::memory_order_acq_rel);
 		old_root->refc--;
 	}

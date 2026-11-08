@@ -37,7 +37,7 @@ void concurrent_fn(uint32_t thread_id)
 
 int main()
 {
-    db.open("test");
+    db = Db::open("test");
     DEFER_close(db);
 
     {
