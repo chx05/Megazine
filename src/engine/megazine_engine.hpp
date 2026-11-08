@@ -18,6 +18,8 @@
 // TODO
 // add asserts and report helpers in debug builds
 
+template <typename>
+constexpr bool dependent_false = false;
 
 template<typename T>
 struct PotentiallyAtomic
@@ -341,7 +343,7 @@ struct StableArena
 			}
 			// if it is available but with wrong signature, print error instead of silent ignore
 			else if constexpr (requires { &T::drop; }) {
-				static_assert(false,
+				static_assert(dependent_false<T>,
 					"T has a member named 'drop', but it cannot be called as obj.drop()");
 			}
 
