@@ -111,15 +111,15 @@ struct PotentiallyAtomic
 	/* non atomic usage */
 
 	// get
-	T& raw() noexcept             { return value; }
-	const T& raw() const noexcept { return value; }
+	T raw() const { return value; }
+	T* raw_mut()  { return &value; }
 
 	// for pointers
 	T operator->() const noexcept requires std::is_pointer_v<T>      { return value; }
 
 	// for structs
 	T* operator->() noexcept requires std::is_class_v<T>             { return &value; }
-	const T* operator->() const noexcept requires std::is_class_v<T> { return &value; }
+	T const* operator->() const noexcept requires std::is_class_v<T> { return &value; }
 };
 
 
@@ -414,7 +414,7 @@ struct StableArena
 
 		// allocates on node
 		auto ptr = &last_node->buffer[last_node->len.raw()];
-		last_node->len.raw() += requested_count;
+		*last_node->len.raw_mut() += requested_count;
 		return ptr;
 	}
 };
