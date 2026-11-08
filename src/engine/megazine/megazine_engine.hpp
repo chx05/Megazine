@@ -20,26 +20,99 @@
 
 
 template<typename T>
-struct Atomic : std::atomic<T>
+struct PotentiallyAtomic
 {
-	using std::atomic<T>::atomic;
+	static_assert(std::atomic_ref<T>::is_always_lock_free, "T must be lock-free");
+	alignas(std::atomic_ref<T>::required_alignment) T value;
 
-	constexpr Atomic() noexcept : std::atomic<T>(T{}) {}
-	constexpr Atomic(T val) noexcept : std::atomic<T>(val) {}
-
-	Atomic(const Atomic& other) noexcept
-		: std::atomic<T>(other.load(std::memory_order_relaxed)) {}
-
-	Atomic& operator=(const Atomic& other) noexcept
+	static PotentiallyAtomic<T> create(T value)
 	{
-		this->store(other.load(std::memory_order_relaxed), std::memory_order_relaxed);
-		return *this;
+		return { .value = value };
 	}
 
-	Atomic& operator=(T val) noexcept
+	std::atomic_ref<T> get_as_atomic()
 	{
-		this->store(val, std::memory_order_relaxed);
-		return *this;
+		return std::atomic_ref(value);
+	}
+
+	T swap_acquire_release(T new_value)
+	{
+		return get_as_atomic().exchange(new_value, std::memory_order_acq_rel);
+	}
+
+	T swap_acquire(T new_value)
+	{
+		return get_as_atomic().exchange(new_value, std::memory_order_acquire);
+	}
+
+	T acquire()
+	{
+		return get_as_atomic().load(std::memory_order_acquire);
+	}
+
+	T load_relaxed()
+	{
+		return get_as_atomic().load(std::memory_order_relaxed);
+	}
+
+	void release(T new_value)
+	{
+		return get_as_atomic().store(new_value, std::memory_order_release);
+	}
+
+	void store_relaxed(T new_value)
+	{
+		return get_as_atomic().store(new_value, std::memory_order_relaxed);
+	}
+
+	bool cas_weak(T* expected_ref, T desired)
+	{
+		return get_as_atomic().compare_exchange_weak(*expected_ref, desired, std::memory_order_acq_rel);
+	}
+
+	bool cas_weak_relaxed(T* expected_ref, T desired)
+	{
+		return get_as_atomic().compare_exchange_weak(*expected_ref, desired, std::memory_order_relaxed);
+	}
+
+	bool cas_strong(T* expected_ref, T desired)
+	{
+		return get_as_atomic().compare_exchange_strong(*expected_ref, desired, std::memory_order_acq_rel);
+	}
+
+	bool cas_strong_acquire(T* expected_ref, T desired)
+	{
+		return get_as_atomic().compare_exchange_strong(*expected_ref, desired, std::memory_order_acquire);
+	}
+
+	void notify_all()
+	{
+		get_as_atomic().notify_all();
+	}
+
+	void wait(T expected)
+	{
+		get_as_atomic().wait(expected, std::memory_order_acquire);
+	}
+
+	void increment()
+	{
+		get_as_atomic()++;
+	}
+
+	void decrement()
+	{
+		get_as_atomic()--;
+	}
+
+	T* get_ref()
+	{
+		return &value;
+	}
+
+	T get() const
+	{
+		return value;
 	}
 };
 
@@ -67,7 +140,7 @@ struct __DeferredCloser
 
 	__DeferredCloser(T& value) : value(value)
 	{
-
+		
 	}
 
 	~__DeferredCloser()
@@ -84,8 +157,8 @@ struct __DeferredCloser
 #define DEFER_DROP(target)  auto CONCAT(_defer_drop_, __COUNTER__)  = __DeferredDropper(target)
 
 
-using page_flag_t = Atomic<uint8_t>;
-using refcounter_t = Atomic<uint64_t>;
+using page_flag_t = PotentiallyAtomic<uint8_t>;
+using refcounter_t = PotentiallyAtomic<uint64_t>;
 using file_descriptor_t = HANDLE;
 // points to chunk of contiguous memory with length PAGE_SIZE
 using page_ref_t = uint8_t*;
@@ -154,7 +227,7 @@ struct PagesMap
 
 		// TODO memset should be safe here
 		for (uint64_t i = 0; i < capacity; ++i)
-			flags[i].store(PAGE_FLAG_NOT_LOADED, std::memory_order_relaxed);
+			flags[i].store_relaxed(PAGE_FLAG_NOT_LOADED);
 
 		return {
 			.count = count,
@@ -223,26 +296,27 @@ struct Arena
 	}
 };
 
+
 template<typename T>
-struct StableArenaBufferNode
+struct StableArena_BufferNode
 {
-	uint32_t len;
+	PotentiallyAtomic<uint32_t> len;
 	T* buffer;
-	StableArenaBufferNode* previous_node;
+	StableArena_BufferNode* previous_node;
 };
 
 template<typename T>
 struct StableArena
 {
 	uint32_t capacity_per_node;
-	StableArenaBufferNode<T>* last_node;
+	PotentiallyAtomic<StableArena_BufferNode<T>*> last_node;
 
-	static StableArena create(uint32_t max_capacity_per_node)
+	static StableArena<T> create(uint32_t max_capacity_per_node)
 	{
 		assert(max_capacity_per_node > 0);
 		return {
 			.capacity_per_node = max_capacity_per_node,
-			.last_node = new StableArenaBufferNode<T>{
+			.last_node = new StableArena_BufferNode<T>{
 				.len = 0,
 				.buffer = new T[max_capacity_per_node],
 				.previous_node = nullptr,
@@ -252,13 +326,15 @@ struct StableArena
 
 	void drop()
 	{
-		auto* node = last_node;
-		last_node = nullptr;
+		auto* node = last_node.swap_acquire(nullptr);
 
 		while (node)
 		{
-			for (uint32_t i = 0; i < node->len; i++)
-				node->buffer[i].drop();
+			// if .drop() is avaiable, i call it
+			if constexpr (requires { node->buffer[0].drop(); }) {
+				for (uint32_t i = 0; i < node->len.get(); i++)
+					node->buffer[i].drop();
+			}
 
 			auto* prev = node->previous_node;
 			delete[] node->buffer;
@@ -267,99 +343,36 @@ struct StableArena
 		}
 	}
 
-	T* alloc_many(uint32_t requested_count)
+	T* concurrent_alloc_many(uint32_t requested_count)
 	{
 		assert(requested_count <= capacity_per_node);
-		assert(last_node != nullptr);
-
-		// full node: link a new node
-		if (last_node->len + requested_count > capacity_per_node)
-		{
-			last_node = new StableArenaBufferNode<T>{
-				.len = 0,
-				.buffer = new T[capacity_per_node],
-				.previous_node = last_node
-			};
-		}
-
-		// allocates on node
-		T* ptr = &last_node->buffer[last_node->len];
-		last_node->len += requested_count;
-		return ptr;
-	}
-};
-
-
-struct SharedStableArena_BufferNode
-{
-	Atomic<uint32_t> len;
-	uint8_t* buffer;
-	SharedStableArena_BufferNode* previous_node;
-};
-
-struct SharedStableArena
-{
-	uint32_t capacity_per_node;
-	Atomic<SharedStableArena_BufferNode*> last_node;
-
-	static SharedStableArena create(uint32_t initial_capacity)
-	{
-		auto* first_node = new SharedStableArena_BufferNode{
-			.len = 0,
-			.buffer = new uint8_t[initial_capacity],
-			.previous_node = nullptr,
-		};
-
-		return {
-			.capacity_per_node = initial_capacity,
-			.last_node = first_node,
-		};
-	}
-
-	void drop()
-	{
-		auto* curr = last_node.exchange(nullptr, std::memory_order_acquire);
-		while (curr)
-		{
-			auto* prev = curr->previous_node;
-			delete[] curr->buffer;
-			delete curr;
-			curr = prev;
-		}
-	}
-
-	uint8_t* alloc(uint32_t requested_size)
-	{
-		assert(requested_size <= capacity_per_node);
 
 		while (true)
 		{
-			auto* node = last_node.load(std::memory_order_acquire);
-			uint32_t offset = node->len.load(std::memory_order_relaxed);
+			auto node = last_node.acquire();
+			uint32_t offset = node->len.load_relaxed();
 
 			// allocate in last_node if there is space
-			while (offset + requested_size <= capacity_per_node)
+			while (offset + requested_count <= capacity_per_node)
 			{
-				if (node->len.compare_exchange_weak(/*by ref*/ offset, offset + requested_size, std::memory_order_relaxed))
+				if (node->len.cas_weak_relaxed(&offset, offset + requested_count))
 				{
 					return &node->buffer[offset];
 				}
 			}
 
 			// last_node full, allocate a new one
-			auto* new_node = new SharedStableArena_BufferNode{
+			auto* new_node = new StableArena_BufferNode<T>{
 				.len = 0,
 				// TODO
 				// take in input a per-thread custom allocator instead
 				// and use it to allocate each node's buffer
 				// so the thread has control over the allocation
-				.buffer = new uint8_t[capacity_per_node],
+				.buffer = new T[capacity_per_node],
 				.previous_node = node
 			};
 
-			if (last_node.compare_exchange_strong(node, new_node,
-				std::memory_order_release,
-				std::memory_order_acquire))
+			if (last_node.cas_strong(&node, new_node))
 			{
 				// winner, the next cycle will allocate
 			}
@@ -372,18 +385,42 @@ struct SharedStableArena
 			}
 		}
 	}
+
+	T* non_concurrent_alloc_many(uint32_t requested_count)
+	{
+		auto last_node_ref = last_node.get_ref();
+		assert(requested_count <= capacity_per_node);
+		assert(*last_node_ref != nullptr);
+
+		// full node: link a new node
+		if ((*last_node_ref)->len.get() + requested_count > capacity_per_node)
+		{
+			last_node = PotentiallyAtomic<StableArena_BufferNode<T>*>::create(new StableArena_BufferNode<T>{
+				.len = 0,
+				.buffer = new T[capacity_per_node],
+				.previous_node = *last_node_ref
+			});
+			last_node_ref = last_node.get_ref();
+		}
+
+		// allocates on node
+		auto len_ref = (*last_node_ref)->len.get_ref();
+		auto ptr = &(*last_node_ref)->buffer[*len_ref];
+		*len_ref += requested_count;
+		return ptr;
+	}
 };
 
 
-struct SharedPagedBuffer
+struct PagedBuffer
 {
-	SharedStableArena arena;
+	StableArena<uint8_t> arena;
 	PagesMap map;
 
-	static SharedPagedBuffer create(uint64_t file_size)
+	static PagedBuffer create(uint64_t file_size)
 	{
 		return {
-			.arena = SharedStableArena::create(PAGE_SIZE * INITIAL_MIN_PAGES_COUNT),
+			.arena = StableArena<uint8_t>::create(PAGE_SIZE * INITIAL_MIN_PAGES_COUNT),
 			.map = PagesMap::create(file_size),
 		};
 	}
@@ -394,9 +431,14 @@ struct SharedPagedBuffer
 		map.drop();
 	}
 
-	void alloc_and_map_page(uint64_t page_index)
+	void concurrent_alloc_and_map_page(uint64_t page_index)
 	{
-		map.array[page_index] = (page_ref_t)arena.alloc(PAGE_SIZE);
+		map.array[page_index] = (page_ref_t)arena.concurrent_alloc_many(PAGE_SIZE);
+	}
+
+	void non_concurrent_alloc_and_map_page(uint64_t page_index)
+	{
+		map.array[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(PAGE_SIZE);
 	}
 
 	uint8_t* pointer_of(uint64_t page_index)
@@ -407,7 +449,7 @@ struct SharedPagedBuffer
 
 struct Root
 {
-	SharedPagedBuffer paged_buffer;
+	PagedBuffer paged_buffer;
 	// TODO
 	// replace refcounting with epoch based cleanup
 	// so that readers can be more cache friendly
@@ -416,8 +458,8 @@ struct Root
 	static Root create(uint64_t file_size)
 	{
 		return {
-			.paged_buffer = SharedPagedBuffer::create(file_size),
-			.refc = 1,
+			.paged_buffer = PagedBuffer::create(file_size),
+			.refc = refcounter_t::create(1),
 		};
 	}
 
@@ -429,7 +471,7 @@ struct Root
 	void drop_and_decrement_refc()
 	{
 		drop();
-		refc--;
+		refc.decrement();
 	}
 };
 
@@ -440,7 +482,7 @@ struct TrxR
 
 	void load_page(uint64_t page_index)
 	{
-		root->paged_buffer.alloc_and_map_page(page_index);
+		root->paged_buffer.concurrent_alloc_and_map_page(page_index);
 		uint64_t file_offset = page_index * PAGE_SIZE;
 		read_page_from_file(fd, file_offset, root->paged_buffer.pointer_of(page_index));
 	}
@@ -450,23 +492,23 @@ struct TrxR
 		auto flag = &root->paged_buffer.map.flags[page_index];
 
 		// already in cache?
-		uint8_t current = flag->load(std::memory_order_acquire);
+		uint8_t current = flag->acquire();
 		if (current >= PAGE_FLAG_LOADED_FOR_READ)
 			return root->paged_buffer.pointer_of(page_index);
 
 		// claiming the job
 		uint8_t expected = PAGE_FLAG_NOT_LOADED;
-		if (flag->compare_exchange_strong(expected, PAGE_FLAG_LOADING, std::memory_order_acquire))
+		if (flag->cas_strong_acquire(&expected, PAGE_FLAG_LOADING))
 		{
 			load_page(page_index);
-			flag->store(PAGE_FLAG_LOADED_FOR_READ, std::memory_order_release);
+			flag->release(PAGE_FLAG_LOADED_FOR_READ);
 			flag->notify_all(); // idk, seems standard pattern
 			return root->paged_buffer.pointer_of(page_index);
 		}
 
 		// or waiting for someone who claimed it first to complete the job
-		while (flag->load(std::memory_order_acquire) == PAGE_FLAG_LOADING)
-			flag->wait(PAGE_FLAG_LOADING, std::memory_order_acquire);
+		while (flag->acquire() == PAGE_FLAG_LOADING)
+			flag->wait(PAGE_FLAG_LOADING);
 
 		return root->paged_buffer.pointer_of(page_index);
 	}
@@ -480,7 +522,7 @@ struct TrxR
 	{
 		if (root != nullptr)
 		{
-			root->refc--;
+			root->refc.decrement();
 			root = nullptr;
 		}
 	}
@@ -496,7 +538,7 @@ struct TrxW
 	TrxR trx_r;
 
 	Root* new_root;
-	SharedPagedBuffer diffs;
+	PagedBuffer diffs;
 
 	static TrxW create(Db* db_ref, TrxR trx_r, Root* new_root);
 
@@ -542,13 +584,13 @@ struct RootsPool
 
 	Root* alloc_root()
 	{
-		auto node = pool.last_node;
+		auto node = pool.last_node.get();
 		while (node != nullptr)
 		{
-			for (uint32_t i = 0; i < node->len; i++)
+			for (uint32_t i = 0; i < node->len.get(); i++)
 			{
 				auto root_ref = &node->buffer[i];
-				if (root_ref->refc.load(std::memory_order_acquire) == 0)
+				if (root_ref->refc.acquire() == 0)
 				{
 					// TODO
 					// find some clever way to cleanup ALL dead roots instead of just the chosen one
@@ -561,7 +603,7 @@ struct RootsPool
 			node = node->previous_node;
 		}
 
-		return pool.alloc_many(1);
+		return pool.non_concurrent_alloc_many(1);
 	}
 };
 
@@ -574,7 +616,7 @@ struct Db
 	// if only one writer transaction is allowed
 	// then probably no pool is needed, just a 2 element swap
 	RootsPool roots_pool;
-	Atomic<Root*> root;
+	PotentiallyAtomic<Root*> root;
 
 	static Db open(char const* filename)
 	{
@@ -621,15 +663,15 @@ struct Db
 		return fd != INVALID_HANDLE_VALUE;
 	}
 
-	TrxR trx_r() const
+	TrxR trx_r()
 	{
 		while (true)
 		{
-			auto* r = root.load(std::memory_order_acquire);
-			uint64_t count = r->refc.load(std::memory_order_relaxed);
+			auto initial_r = root.acquire();
+			uint64_t count = initial_r->refc.load_relaxed();
 
 			// increment only if not already 0
-			while (count > 0 && !r->refc.compare_exchange_weak(count, count + 1, std::memory_order_acq_rel))
+			while (count > 0 && !initial_r->refc.cas_weak(&count, count + 1))
 			{
 				// nothing
 			}
@@ -638,11 +680,11 @@ struct Db
 				continue; // someone is dropping the root, retry with updated root
 
 			// if root hasn't been replaced while incrementing
-			if (root.load(std::memory_order_acquire) == r)
-				return TrxR{ .root = r, .fd = fd };
+			if (root.acquire() == initial_r)
+				return TrxR{ .root = initial_r, .fd = fd };
 
 			// if it was replaced mid flight, undo refcount
-			r->refc--;
+			initial_r->refc.decrement();
 		}
 	}
 
@@ -663,7 +705,7 @@ inline TrxW TrxW::create(Db* db_ref, TrxR trx_r, Root* new_root)
 		.db_ref = db_ref,
 		.trx_r = trx_r,
 		.new_root = new_root,
-		.diffs = SharedPagedBuffer::create(db_ref->file_size),
+		.diffs = PagedBuffer::create(db_ref->file_size),
 	};
 }
 
@@ -684,8 +726,8 @@ inline void TrxW::close()
 		status = TrxW_Status::Closed;
 		trx_r.close();
 
-		auto old_root = db_ref->root.exchange(new_root, std::memory_order_acq_rel);
-		old_root->refc--;
+		auto old_root = db_ref->root.swap_acquire_release(new_root);
+		old_root->refc.decrement();
 	}
 }
 
