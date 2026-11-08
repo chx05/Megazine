@@ -106,14 +106,18 @@ struct PotentiallyAtomic
 	}
 
 
-	// for non atomic usage:
+	/* non atomic usage */
 
-	T& raw() noexcept { return value; }
+	// get
+	T& raw() noexcept             { return value; }
 	const T& raw() const noexcept { return value; }
 
-	T operator->() const noexcept requires std::is_pointer_v<T> {
-		return value;
-	}
+	// for pointers
+	T operator->() const noexcept requires std::is_pointer_v<T>      { return value; }
+
+	// for structs
+	T* operator->() noexcept requires std::is_class_v<T>             { return &value; }
+	const T* operator->() const noexcept requires std::is_class_v<T> { return &value; }
 };
 
 
