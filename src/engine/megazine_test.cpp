@@ -1,6 +1,7 @@
 #include <iostream>
 #include <syncstream>
 #include <thread>
+#include <random>
 #include "megazine_engine.hpp"
 
 // this is what a fat pointer should look like
@@ -35,6 +36,79 @@ void concurrent_fn(uint32_t thread_id)
     }
 }
 
+void concurrent_infinite_fn(uint32_t thread_id)
+{
+    auto trx = db.trx_r();
+    DEFER_close(trx);
+
+    thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<uint64_t> dist(0, trx.pages_count() - 1);
+
+    while (true)
+    {
+        uint64_t i = dist(gen);
+        uint8_t const* page_content = trx.get_page(i);
+        uint64_t const* page_content_128bit = (uint64_t const*)page_content;
+
+        std::osyncstream(std::cout)
+            << "[thread " << thread_id << "] "
+            << i << ":\t"
+            << std::string_view((char const*)page_content, PAGE_SIZE) << '\n'
+            << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
+    }
+}
+
+void concurrent_infinite_active_fn(uint32_t thread_id)
+{
+    while (true)
+    {
+        auto trx = db.trx_r();
+        DEFER_close(trx);
+
+        auto first_page = (uint64_t const*)trx.get_page(0);
+
+        std::osyncstream(std::cout)
+            << "[thread " << thread_id << "] "
+            << first_page[0] << " " << first_page[1]
+            << "\n";
+    }
+}
+
+void concurrent_infinite_passive_fn(uint32_t thread_id)
+{
+    auto trx = db.trx_r();
+    DEFER_close(trx);
+
+    while (true)
+    {
+        auto first_page = (uint64_t const*)trx.get_page(0);
+
+        std::osyncstream(std::cout)
+            << "[thread " << thread_id << "] "
+            << first_page[0] << " " << first_page[1]
+            << "\n";
+    }
+}
+
+void infinite_writer_fn(uint32_t thread_id)
+{
+    (void)thread_id;
+
+    thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<uint64_t> dist(0, 100);
+
+    while (true)
+    {
+        auto trx = db.trx_w();
+        DEFER_close(trx);
+
+        auto first_page_mut = (uint64_t*)trx.get_mut_page(0);
+        first_page_mut[0] = dist(gen);
+
+        //trx.abort();
+    }
+}
+
 int main()
 {
     db = Db::open("test");
@@ -49,7 +123,56 @@ int main()
     }
 
     {
-        auto trx = db.trx_r();
+        /*std::thread t1(concurrent_infinite_fn, 1);
+        std::thread t2(concurrent_infinite_fn, 2);
+
+        t1.join();
+        t2.join();*/
+    }
+
+    {
+        //std::thread t1(concurrent_infinite_passive_fn, 1);
+        //std::thread t2(concurrent_infinite_passive_fn, 2);
+
+        //std::this_thread::sleep_for(std::chrono::seconds(3));
+        //auto trx = db.trx_w();
+        //DEFER_close(trx);
+
+        //auto first_page_mut = (uint64_t*)trx.get_mut_page(0);
+        //first_page_mut[0] = 30;
+
+        //auto first_page = (uint64_t const*)trx.get_page(0);
+        //std::cout << first_page[0] << " " << first_page[1] << "\n";
+
+        ////trx.abort();
+        //trx.close();
+
+        //t1.join();
+        //t2.join();
+    }
+
+    {
+        std::thread t1(concurrent_infinite_active_fn, 1);
+        std::thread t2(concurrent_infinite_active_fn, 2);
+        std::thread t3(infinite_writer_fn, 3);
+
+        t1.join();
+        t2.join();
+        t3.join();
+    }
+
+    {
+        /*std::thread t1(concurrent_infinite_passive_fn, 1);
+        std::thread t2(concurrent_infinite_passive_fn, 2);
+        std::thread t3(infinite_writer_fn, 3);
+
+        t1.join();
+        t2.join();
+        t3.join();*/
+    }
+
+    {
+        /*auto trx = db.trx_r();
         DEFER_close(trx);
 
         for (uint64_t i = 0; i < trx.pages_count(); i++)
@@ -61,21 +184,28 @@ int main()
                 << i << ":\t"
                 << std::string_view((char const*)page_content, PAGE_SIZE) << '\n'
                 << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
-        }
+        }*/
     }
 
     {
-        /*auto trx = db.trx_w();
+        //auto trx = db.trx_w();
+        //DEFER_close(trx);
+
+        //auto first_page_mut = (uint64_t*)trx.get_mut_page(0);
+        //first_page_mut[0] = 30;
+
+        //auto first_page = (uint64_t const*)trx.get_page(0);
+        //std::cout << first_page[0] << " " << first_page[1] << "\n";
+
+        ////trx.abort();
+    }
+
+    {
+        /*auto trx = db.trx_r();
         DEFER_close(trx);
 
-        for (uint64_t i = 0; i < trx.pages_count(); i++)
-        {
-            uint8_t const* page_content = trx.get_page(i);
-            std::cout << i << ":\t" << std::string_view((char const*)page_content, PAGE_SIZE) << '\n';
-
-            uint64_t const* page_content_128bit = (uint64_t const*)page_content;
-            std::cout << '\t' << page_content_128bit[0] << '|' << page_content_128bit[1] << "\n\n";
-        }*/
+        auto first_page = (uint64_t const*)trx.get_page(0);
+        std::cout << first_page[0] << " " << first_page[1] << "\n";*/
     }
 
     // unsafe page add
