@@ -98,14 +98,14 @@ struct PotentiallyAtomic
 		get_as_atomic().wait(expected, std::memory_order_acquire);
 	}
 
-	void increment()
+	T increment()
 	{
-		get_as_atomic()++;
+		return get_as_atomic()++;
 	}
 
-	void decrement()
+	T decrement()
 	{
-		get_as_atomic()--;
+		return get_as_atomic()--;
 	}
 
 
@@ -605,6 +605,7 @@ struct TrxR
 {
 	Root* root;
 	file_descriptor_t fd;
+	uint64_t epoch_stamp;
 
 	void load_page(uint64_t page_index)
 	{
@@ -757,6 +758,7 @@ struct Db
 	// then probably no pool is needed, just a 2 element swap
 	RootsPool roots_pool;
 	PotentiallyAtomic<Root*> root;
+	PotentiallyAtomic<uint64_t> epoch;
 
 	static Db open(char const* filename)
 	{
@@ -783,7 +785,8 @@ struct Db
 			.fd = fd,
 			.file_size = file_size,
 			.roots_pool = roots_pool,
-			.root = root
+			.root = root,
+			.epoch = PotentiallyAtomic<uint64_t>::create(0)
 		};
 	}
 
@@ -821,7 +824,7 @@ struct Db
 
 			// if root hasn't been replaced while incrementing
 			if (root.acquire() == initial_r)
-				return TrxR{ .root = initial_r, .fd = fd };
+				return TrxR{ .root = initial_r, .fd = fd, .epoch_stamp = epoch.increment() };
 
 			// if it was replaced mid flight, undo refcount
 			initial_r->refc.decrement();
@@ -874,6 +877,12 @@ inline void TrxW::close()
 		// it becomes possible when all transactions (both readers and writers)
 		// started before this trx_w are closed.
 		// then this one can be written to the original file and the temp files eliminated.
+		// basically a simple epoch system
+		// rule: i can flush to originale file
+		//	     when all the reader transactions older than the last write transactions are dead
+		// otherwise i'd need multiple temp files (each one marked with its own epoch)
+		// this would allow to flush to original file non-latest write transactions
+		// and marking only some page in the root as ejectable.
 	}
 }
 
