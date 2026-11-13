@@ -185,15 +185,19 @@ enum struct PageFlag : uint8_t
 };
 
 using atomic_page_flag_t = PotentiallyAtomic<PageFlag>;
-using refcounter_t = PotentiallyAtomic<uint64_t>;
 using file_descriptor_t = HANDLE;
 // points to chunk of contiguous memory with length PAGE_SIZE
 using page_ref_t = uint8_t*;
+using epoch_t = uint64_t;
+using page_index_t = uint64_t;
+using thread_id_t = uint32_t;
 
 constexpr uint64_t PAGE_SIZE = 16;
 constexpr uint64_t INITIAL_MIN_PAGES_COUNT = 10;
 constexpr uint64_t INITIAL_MIN_DIFF_PAGES_COUNT = 10;
 constexpr uint64_t INITIAL_ROOTS_POOL_CAPACITY = 5;
+
+constexpr epoch_t EPOCH_NONE = (epoch_t)4611686018427387903; // 2^62 - 1 (see ThreadInfo, its 62 bits not 64)
 
 inline bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void* dest_buffer)
 {
@@ -293,7 +297,7 @@ struct StableArena_BufferNode
 template<typename T>
 struct StableArena
 {
-	uint32_t capacity_per_node;
+	uint32_t capacity_per_node = 0;
 	PotentiallyAtomic<StableArena_BufferNode<T>*> last_node;
 
 	static StableArena<T> create(uint32_t max_capacity_per_node)
@@ -311,6 +315,9 @@ struct StableArena
 
 	void drop()
 	{
+		if (capacity_per_node == 0)
+			return;
+
 		auto* node = last_node.swap_acquire(nullptr);
 
 		while (node)
@@ -446,8 +453,8 @@ struct Writer_PageMap
 struct Reader_PageMap
 {
 	uint64_t count;
-	page_ref_t* refs;
-	atomic_page_flag_t* flags;
+	page_ref_t* refs = nullptr;
+	atomic_page_flag_t* flags = nullptr;
 
 	static Reader_PageMap create(uint64_t file_size)
 	{
@@ -482,6 +489,9 @@ struct Reader_PageMap
 
 	void drop()
 	{
+		if (refs == nullptr)
+			return;
+
 		delete[] refs;
 		delete[] flags;
 		refs = nullptr;
@@ -510,17 +520,17 @@ struct PagedBuffer
 		map.drop();
 	}
 
-	void concurrent_alloc_and_map_page(uint64_t page_index)
+	void concurrent_alloc_and_map_page(page_index_t page_index)
 	{
 		map.refs[page_index] = (page_ref_t)arena.concurrent_alloc_many(PAGE_SIZE);
 	}
 
-	void non_concurrent_alloc_and_map_page(uint64_t page_index)
+	void non_concurrent_alloc_and_map_page(page_index_t page_index)
 	{
 		map.refs[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(PAGE_SIZE);
 	}
 
-	uint8_t const* pointer_of(uint64_t page_index)
+	uint8_t const* pointer_of(page_index_t page_index)
 	{
 		return map.refs[page_index];
 	}
@@ -545,17 +555,17 @@ struct DiffBuffer
 		map.drop();
 	}
 
-	void alloc_and_map_page(uint64_t page_index)
+	void alloc_and_map_page(page_index_t page_index)
 	{
 		map.refs[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(PAGE_SIZE);
 	}
 
-	uint8_t const* pointer_of(uint64_t page_index)
+	uint8_t const* pointer_of(page_index_t page_index)
 	{
 		return map.refs[page_index];
 	}
 
-	uint8_t* mut_pointer_of(uint64_t page_index)
+	uint8_t* mut_pointer_of(page_index_t page_index)
 	{
 		return map.refs[page_index];
 	}
@@ -564,16 +574,11 @@ struct DiffBuffer
 struct Root
 {
 	PagedBuffer paged_buffer;
-	// TODO
-	// replace refcounting with epoch based cleanup
-	// so that readers can be more cache friendly
-	refcounter_t refc;
 
 	static Root create(uint64_t file_size)
 	{
 		return {
 			.paged_buffer = PagedBuffer::create(file_size),
-			.refc = refcounter_t::create(1),
 		};
 	}
 
@@ -583,9 +588,7 @@ struct Root
 			.paged_buffer = {
 				.arena = diffs.arena,
 				.map = Reader_PageMap::consume(diffs.map)
-			},
-
-			.refc = refcounter_t::create(1),
+			}
 		};
 	}
 
@@ -593,28 +596,21 @@ struct Root
 	{
 		paged_buffer.drop();
 	}
-
-	void drop_and_decrement_refc()
-	{
-		drop();
-		refc.decrement();
-	}
 };
+
+
+struct Db;
 
 struct TrxR
 {
 	Root* root;
-	file_descriptor_t fd;
-	uint64_t epoch_stamp;
+	Db* db_ref;
+	epoch_t epoch_stamp;
+	thread_id_t thread_id;
 
-	void load_page(uint64_t page_index)
-	{
-		root->paged_buffer.concurrent_alloc_and_map_page(page_index);
-		uint64_t file_offset = page_index * PAGE_SIZE;
-		read_page_from_file(fd, file_offset, (void*)root->paged_buffer.pointer_of(page_index));
-	}
+	void load_page(page_index_t page_index);
 
-	uint8_t const* get_page(uint64_t page_index)
+	uint8_t const* get_page(page_index_t page_index)
 	{
 		auto flag = &root->paged_buffer.map.flags[page_index];
 
@@ -645,35 +641,24 @@ struct TrxR
 		return root->paged_buffer.map.count;
 	}
 
-	void close()
-	{
-		if (root != nullptr)
-		{
-			root->refc.decrement();
-			root = nullptr;
-		}
-	}
+	void close();
 };
 
-struct Db;
 enum struct TrxW_Status { Open, Closed, Aborted };
 struct TrxW
 {
 	TrxW_Status status;
-
-	Db* db_ref;
 	TrxR trx_r;
-
 	DiffBuffer diffs;
 
-	static TrxW create(Db* db_ref, TrxR trx_r);
+	static TrxW create(TrxR trx_r);
 
 	uint64_t pages_count() const
 	{
 		return diffs.map.refs.count;
 	}
 
-	uint8_t const* get_page(uint64_t page_index)
+	uint8_t const* get_page(page_index_t page_index)
 	{
 		auto flag = diffs.map.flags[page_index].raw();
 		if (flag == PageFlag::loaded)
@@ -682,7 +667,7 @@ struct TrxW
 		return trx_r.get_page(page_index);
 	}
 
-	uint8_t* get_mut_page(uint64_t page_index)
+	uint8_t* get_mut_page(page_index_t page_index)
 	{
 		auto flag = diffs.map.flags[page_index].raw();
 		if (flag == PageFlag::loaded)
@@ -698,9 +683,47 @@ struct TrxW
 		return diff_page;
 	}
 
-	void abort();
+	void abort()
+	{
+		if (status == TrxW_Status::Open)
+		{
+			status = TrxW_Status::Aborted;
+			trx_r.close();
+			diffs.drop();
+		}
+	}
+
 	void close();
 };
+
+
+// TODO
+// consider the use of alignas(64) which increases throughtput
+// at the cost of wasting 56 bytes for each threadinfo
+struct ThreadInfo
+{
+	epoch_t current_epoch;
+	Root* root_in_use;
+};
+
+struct ThreadMap
+{
+	uint32_t count;
+	PotentiallyAtomic<ThreadInfo>* buffer;
+
+	static ThreadMap create(uint32_t count)
+	{
+		auto buffer = new PotentiallyAtomic<ThreadInfo>[count];
+		for (uint64_t i = 0; i < count; i++)
+			buffer[i] = PotentiallyAtomic<ThreadInfo>::create({.current_epoch = EPOCH_NONE, .root_in_use = nullptr});
+
+		return {
+			.count = count,
+			.buffer = buffer,
+		};
+	}
+};
+
 
 // TODO
 // as long as only one write transaction is allowed, alloc_root is ok
@@ -712,7 +735,7 @@ struct RootsPool
 	static RootsPool create()
 	{
 		return {
-			.pool = StableArena<Root>::create(INITIAL_ROOTS_POOL_CAPACITY),
+			.pool = StableArena<Root>::create(INITIAL_ROOTS_POOL_CAPACITY)
 		};
 	}
 
@@ -721,7 +744,7 @@ struct RootsPool
 		pool.drop();
 	}
 
-	Root* alloc_root()
+	Root* alloc_root(ThreadMap const* thread_map_ref)
 	{
 		auto node = pool.last_node.raw();
 		while (node != nullptr)
@@ -729,7 +752,18 @@ struct RootsPool
 			for (uint32_t i = 0; i < node->len.raw(); i++)
 			{
 				auto root_ref = &node->buffer[i];
-				if (root_ref->refc.acquire() == 0)
+				bool root_ref_is_still_in_use = false;
+				for (uint32_t j = 0; j < thread_map_ref->count; j++)
+				{
+					// this is thread safe only as long as there is one write transaction only
+					if (thread_map_ref->buffer[i].acquire().root_in_use == root_ref)
+					{
+						root_ref_is_still_in_use = true;
+						break;
+					}
+				}
+
+				if (root_ref_is_still_in_use == false)
 				{
 					// TODO
 					// find some clever way to cleanup ALL dead roots instead of just the chosen one
@@ -748,19 +782,20 @@ struct RootsPool
 	}
 };
 
+
 struct Db
 {
 	char const* filename;
-	file_descriptor_t fd;
+	file_descriptor_t fd = INVALID_HANDLE_VALUE;
 	uint64_t file_size;
-	// TODO
-	// if only one writer transaction is allowed
-	// then probably no pool is needed, just a 2 element swap
+	
 	RootsPool roots_pool;
 	PotentiallyAtomic<Root*> root;
-	PotentiallyAtomic<uint64_t> epoch;
+	PotentiallyAtomic<epoch_t> epoch;
 
-	static Db open(char const* filename)
+	ThreadMap thread_map;
+
+	static Db open(char const* filename, uint32_t threads_count)
 	{
 		auto fd = CreateFileA(
 			filename,
@@ -776,17 +811,19 @@ struct Db
 		GetFileSizeEx(fd, &file_size_result);
 		auto file_size = (uint64_t)file_size_result.QuadPart;
 
+		auto thread_map = ThreadMap::create(threads_count);
 		auto roots_pool = RootsPool::create();
-		auto root = roots_pool.alloc_root();
-		*root = Root::create(file_size);
+		auto first_root = roots_pool.alloc_root(&thread_map);
+		*first_root = Root::create(file_size);
 
 		return {
 			.filename = filename,
 			.fd = fd,
 			.file_size = file_size,
 			.roots_pool = roots_pool,
-			.root = root,
-			.epoch = PotentiallyAtomic<uint64_t>::create(0)
+			.root = first_root,
+			.epoch = PotentiallyAtomic<epoch_t>::create(0),
+			.thread_map = thread_map
 		};
 	}
 
@@ -806,56 +843,53 @@ struct Db
 		return fd != INVALID_HANDLE_VALUE;
 	}
 
-	TrxR trx_r()
+	TrxR trx_r(thread_id_t thread_id)
 	{
-		while (true)
-		{
-			auto initial_r = root.acquire();
-			uint64_t count = initial_r->refc.load_relaxed();
+		auto epoch_stamp = epoch.increment();
+		auto current_root = root.acquire();
 
-			// increment only if not already 0
-			while (count > 0 && !initial_r->refc.cas_weak(&count, count + 1))
-			{
-				// nothing
-			}
+		this->thread_map.buffer[thread_id].release({.current_epoch = epoch_stamp, .root_in_use = current_root});
 
-			if (count == 0)
-				continue; // someone is dropping the root, retry with updated root
-
-			// if root hasn't been replaced while incrementing
-			if (root.acquire() == initial_r)
-				return TrxR{ .root = initial_r, .fd = fd, .epoch_stamp = epoch.increment() };
-
-			// if it was replaced mid flight, undo refcount
-			initial_r->refc.decrement();
-		}
+		return {
+			.root = current_root,
+			.db_ref = this,
+			.epoch_stamp = epoch_stamp,
+			.thread_id = thread_id
+		};
 	}
 
-	TrxW trx_w()
+	TrxW trx_w(thread_id_t thread_id)
 	{
-		return TrxW::create(this, trx_r());
+		return TrxW::create(trx_r(thread_id));
 	}
 };
 
 
-inline TrxW TrxW::create(Db* db_ref, TrxR trx_r)
+
+
+inline void TrxR::load_page(page_index_t page_index)
+{
+	root->paged_buffer.concurrent_alloc_and_map_page(page_index);
+	uint64_t file_offset = page_index * PAGE_SIZE;
+	read_page_from_file(db_ref->fd, file_offset, (void*)root->paged_buffer.pointer_of(page_index));
+}
+
+inline void TrxR::close()
+{
+	if (root == nullptr)
+		return;
+
+	root = nullptr;
+	db_ref->thread_map.buffer[thread_id].release({.current_epoch = EPOCH_NONE});
+}
+
+inline TrxW TrxW::create(TrxR trx_r)
 {
 	return {
 		.status = TrxW_Status::Open,
-		.db_ref = db_ref,
 		.trx_r = trx_r,
-		.diffs = DiffBuffer::create(db_ref->file_size),
+		.diffs = DiffBuffer::create(trx_r.db_ref->file_size),
 	};
-}
-
-inline void TrxW::abort()
-{
-	if (status == TrxW_Status::Open)
-	{
-		status = TrxW_Status::Aborted;
-		trx_r.close();
-		diffs.drop();
-	}
 }
 
 inline void TrxW::close()
@@ -864,28 +898,65 @@ inline void TrxW::close()
 	{
 		status = TrxW_Status::Closed;
 
-		// deliberately not dropping diffbuffer
-		auto new_root = db_ref->roots_pool.alloc_root();
-		*new_root = Root::consume(diffs);
+		// alloc new root and cleanup previous usage, if any
+		auto new_root = trx_r.db_ref->roots_pool.alloc_root(&trx_r.db_ref->thread_map);
+		new_root->drop();
 
-		auto old_root = db_ref->root.swap_acquire_release(new_root);
-		old_root->refc.decrement();
+		// deliberately not dropping diffbuffer
+		*new_root = Root::consume(diffs);
+		trx_r.db_ref->root.swap_acquire_release(new_root);
 
 		// TODO
-		// flushing to temp file
-		// and when possible flush to original file
-		// it becomes possible when all transactions (both readers and writers)
-		// started before this trx_w are closed.
-		// then this one can be written to the original file and the temp files eliminated.
-		// basically a simple epoch system
-		// rule: i can flush to originale file
-		//	     when all the reader transactions older than the last write transactions are dead
-		// otherwise i'd need multiple temp files (each one marked with its own epoch)
-		// this would allow to flush to original file non-latest write transactions
-		// and marking only some page in the root as ejectable.
+		// flushing to .epochN.temp file
 	}
 }
 
+
+// TODO
+// as long as only one write transaction is allowed, alloc_root is ok
+// but it's not thread safe right now so this must be changed for concurrent writers
+//struct RootsPool
+//{
+//	StableArena<Root> pool;
+//
+//	static RootsPool create()
+//	{
+//		return {
+//			.pool = StableArena<Root>::create(INITIAL_ROOTS_POOL_CAPACITY),
+//		};
+//	}
+//
+//	void drop()
+//	{
+//		pool.drop();
+//	}
+//
+//	Root* alloc_root()
+//	{
+//		auto node = pool.last_node.raw();
+//		while (node != nullptr)
+//		{
+//			for (uint32_t i = 0; i < node->len.raw(); i++)
+//			{
+//				auto root_ref = &node->buffer[i];
+//				if (root_ref->refc.acquire() == 0)
+//				{
+//					// TODO
+//					// find some clever way to cleanup ALL dead roots instead of just the chosen one
+//					// and to do it even without creating a write transaction.
+//					// for example freed roots should be put in a list
+//					// and the list used here instead of the cleanup
+//					root_ref->drop(); // cleanup first
+//					return root_ref;
+//				}
+//			}
+//
+//			node = node->previous_node;
+//		}
+//
+//		return pool.non_concurrent_alloc_many(1);
+//	}
+//};
 
 //
 //bool add_blank_page(struct PagedBuffer* b, uint64_t* out_page_index)

@@ -20,7 +20,7 @@ static Db db;
 
 void concurrent_fn(uint32_t thread_id)
 {
-    auto trx = db.trx_r();
+    auto trx = db.trx_r(thread_id);
     DEFER_close(trx);
 
     for (uint64_t i = 0; i < trx.pages_count(); i++)
@@ -38,7 +38,7 @@ void concurrent_fn(uint32_t thread_id)
 
 void concurrent_infinite_fn(uint32_t thread_id)
 {
-    auto trx = db.trx_r();
+    auto trx = db.trx_r(thread_id);
     DEFER_close(trx);
 
     thread_local std::mt19937 gen(std::random_device{}());
@@ -62,7 +62,7 @@ void concurrent_infinite_active_fn(uint32_t thread_id)
 {
     while (true)
     {
-        auto trx = db.trx_r();
+        auto trx = db.trx_r(thread_id);
         DEFER_close(trx);
 
         auto first_page = (uint64_t const*)trx.get_page(0);
@@ -76,7 +76,7 @@ void concurrent_infinite_active_fn(uint32_t thread_id)
 
 void concurrent_infinite_passive_fn(uint32_t thread_id)
 {
-    auto trx = db.trx_r();
+    auto trx = db.trx_r(thread_id);
     DEFER_close(trx);
 
     while (true)
@@ -99,7 +99,7 @@ void infinite_writer_fn(uint32_t thread_id)
 
     while (true)
     {
-        auto trx = db.trx_w();
+        auto trx = db.trx_w(thread_id);
         DEFER_close(trx);
 
         auto first_page_mut = (uint64_t*)trx.get_mut_page(0);
@@ -111,7 +111,7 @@ void infinite_writer_fn(uint32_t thread_id)
 
 int main()
 {
-    db = Db::open("test");
+    db = Db::open("test", 50);
     DEFER_close(db);
 
     {
