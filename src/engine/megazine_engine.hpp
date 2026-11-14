@@ -270,24 +270,24 @@ struct Arena
 		capacity = 0;
 	}
 
-	void ensure_has_space_for(uint64_t incoming_count)
+	void enlarge_if_needed(uint64_t incoming_count)
 	{
-		if (count + incoming_count >= capacity)
-		{
-			auto old_buffer = buffer;
+		if (count + incoming_count <= capacity)
+			return;
+		
+		auto old_buffer = buffer;
 
-			capacity = std::max(capacity * 2, capacity + incoming_count);
-			auto new_buffer = new T[capacity];
-			std::copy_n(old_buffer, count, new_buffer);
-			buffer = new_buffer;
+		capacity = std::max(capacity * 2, capacity + incoming_count);
+		auto new_buffer = new T[capacity];
+		std::copy_n(old_buffer, count, new_buffer);
+		buffer = new_buffer;
 
-			delete[] old_buffer;
-		}
+		delete[] old_buffer;
 	}
 
 	T* alloc_many(uint64_t requested_count)
 	{
-		ensure_has_space_for(requested_count);
+		enlarge_if_needed(requested_count);
 		auto start = count;
 		count += requested_count;
 		return &buffer[start];
@@ -424,12 +424,6 @@ struct StableArena
 struct Writer_PageMap
 {
 	Arena<page_ref_t> refs;
-	// this doesn't need to be atomic, it is always used as plain value.
-	// the atomic wrapper is there so on commit i can move flags.buffer
-	// directly to the new root's reader page map in O(1)
-	// TODO
-	// when this becomes resizable
-	// remember to default the new resized space to PAGE_FLAG_NOT_LOADED
 	Arena<atomic_page_flag_t> flags;
 
 	static Writer_PageMap create(uint64_t file_size)
@@ -456,6 +450,16 @@ struct Writer_PageMap
 	{
 		refs.drop();
 		flags.drop();
+	}
+
+	void ensure_capacity(uint64_t expected_capacity)
+	{
+		auto current_pages_count = flags.count;
+		auto incoming_count = expected_capacity - current_pages_count;
+		assert(incoming_count >= 0);
+
+		refs.enlarge_if_needed(incoming_count);
+		flags.enlarge_if_needed(incoming_count);
 	}
 };
 
@@ -532,6 +536,11 @@ struct PagedBuffer
 		map.drop();
 	}
 
+	uint64_t count() const
+	{
+		return map.count;
+	}
+
 	void concurrent_alloc_and_map_page(page_index_t page_index)
 	{
 		map.refs[page_index] = (page_ref_t)arena.concurrent_alloc_many(PAGE_SIZE);
@@ -565,6 +574,11 @@ struct DiffBuffer
 	{
 		arena.drop();
 		map.drop();
+	}
+
+	uint64_t count() const
+	{
+		return map.flags.count;
 	}
 
 	void alloc_and_map_page(page_index_t page_index)
@@ -670,6 +684,11 @@ struct TrxW
 		return diffs.map.refs.count;
 	}
 
+	uint64_t file_size() const
+	{
+		return pages_count() * PAGE_SIZE;
+	}
+
 	uint8_t const* get_page(page_index_t page_index)
 	{
 		auto flag = diffs.map.flags[page_index].raw();
@@ -693,6 +712,39 @@ struct TrxW
 		*diffs.map.flags[page_index].raw_mut() = PageFlag::modified;
 
 		return diff_page;
+	}
+
+	page_index_t push_page()
+	{
+		modify_file_size(file_size() + PAGE_SIZE);
+		return pages_count() - 1;
+	}
+
+	void pop_page()
+	{
+		modify_file_size(file_size() - PAGE_SIZE);
+	}
+
+	void modify_file_size(uint64_t new_file_size)
+	{
+		assert(new_file_size > 0);
+		assert(new_file_size % PAGE_SIZE == 0);
+
+		auto previous_pages_count = diffs.count();
+		auto new_pages_count = new_file_size / PAGE_SIZE;
+
+		if (new_pages_count > previous_pages_count)
+			diffs.map.ensure_capacity(new_pages_count);
+
+		diffs.map.flags.count = new_pages_count;
+		diffs.map.refs.count = new_pages_count;
+
+		// alloc and update default flag to new uninitialized space
+		for (uint64_t i = previous_pages_count; i < new_pages_count; i++)
+		{
+			diffs.alloc_and_map_page(i);
+			diffs.map.flags[i] = atomic_page_flag_t::create(PageFlag::modified);
+		}
 	}
 
 	void abort()
@@ -810,7 +862,6 @@ struct Db
 {
 	char const* filename;
 	file_descriptor_t fd = INVALID_HANDLE_VALUE;
-	uint64_t file_size;
 	
 	RootsPool roots_pool;
 	PotentiallyAtomic<Root*> root;
@@ -842,12 +893,16 @@ struct Db
 		return {
 			.filename = filename,
 			.fd = fd,
-			.file_size = file_size,
 			.roots_pool = roots_pool,
 			.root = first_root,
 			.epoch = PotentiallyAtomic<epoch_t>::create(0),
 			.thread_map = thread_map
 		};
+	}
+
+	uint64_t file_size()
+	{
+		return root.acquire()->paged_buffer.count() * PAGE_SIZE;
 	}
 
 	void close()
@@ -921,7 +976,7 @@ inline TrxW TrxW::create(TrxR trx_r)
 	return {
 		.status = TrxW_Status::Open,
 		.trx_r = trx_r,
-		.diffs = DiffBuffer::create(trx_r.db_ref->file_size),
+		.diffs = DiffBuffer::create(trx_r.db_ref->file_size()),
 	};
 }
 
@@ -960,140 +1015,3 @@ inline void TrxW::close()
 	trx_r.close();
 }
 
-
-// TODO
-// as long as only one write transaction is allowed, alloc_root is ok
-// but it's not thread safe right now so this must be changed for concurrent writers
-//struct RootsPool
-//{
-//	StableArena<Root> pool;
-//
-//	static RootsPool create()
-//	{
-//		return {
-//			.pool = StableArena<Root>::create(INITIAL_ROOTS_POOL_CAPACITY),
-//		};
-//	}
-//
-//	void drop()
-//	{
-//		pool.drop();
-//	}
-//
-//	Root* alloc_root()
-//	{
-//		auto node = pool.last_node.raw();
-//		while (node != nullptr)
-//		{
-//			for (uint32_t i = 0; i < node->len.raw(); i++)
-//			{
-//				auto root_ref = &node->buffer[i];
-//				if (root_ref->refc.acquire() == 0)
-//				{
-//					// TODO
-//					// find some clever way to cleanup ALL dead roots instead of just the chosen one
-//					// and to do it even without creating a write transaction.
-//					// for example freed roots should be put in a list
-//					// and the list used here instead of the cleanup
-//					root_ref->drop(); // cleanup first
-//					return root_ref;
-//				}
-//			}
-//
-//			node = node->previous_node;
-//		}
-//
-//		return pool.non_concurrent_alloc_many(1);
-//	}
-//};
-
-//
-//bool add_blank_page(struct PagedBuffer* b, uint64_t* out_page_index)
-//{
-//	if (b->used_map_capacity == b->map_capacity)
-//	{
-//		b->map_capacity *= 2;
-//		void* r = realloc(b->map, b->map_capacity);
-//		if (r == NULL)
-//			return false;
-//		b->map = (uint64_t*)r;
-//	}
-//
-//	*out_page_index = b->used_map_capacity;
-//	b->used_map_capacity += 1;
-//	return alloc_and_map_page(b, *out_page_index);
-//}
-
-//void clone_diff_buffer_from(struct PagedBuffer* b, struct PagedBuffer* from)
-//{
-//	b->used_arena_capacity = from->used_arena_capacity;
-//	b->arena_capacity = from->arena_capacity;
-//	b->arena = (uint8_t*)malloc(b->arena_capacity);
-//	if (b->arena != NULL)
-//		memcpy(b->arena, from->arena, b->arena_capacity);
-//
-//	b->used_map_capacity = from->used_map_capacity;
-//	b->map_capacity = from->map_capacity;
-//	uint64_t malloc_size_for_map = b->map_capacity * sizeof(uint64_t);
-//	b->map = (uint64_t*)malloc(malloc_size_for_map);
-//	if (b->map != NULL)
-//		memcpy(b->map, from->map, malloc_size_for_map);
-//}
-
-//void init_roots_pool(RootsPool * p)
-//{
-//	p->capacity = INITIAL_ROOTS_POOL_CAPACITY;
-//
-//	p->arena_len = 0;
-//	p->arena = (SharedReadonlyPagedBuffer*)malloc(p->capacity * sizeof(SharedReadonlyPagedBuffer));
-//
-//	p->slots_len = 0;
-//	p->free_slots = (uint32_t*)malloc(p->capacity * sizeof(uint32_t));
-//}
-//
-//void apply_diff_buffer_to_file(Db* db)
-//{
-//	// TODO
-//	// convert this function to use WTrx
-//	// 
-//	// TODO
-//	// file flushing can be done ONLY on a readonly_base that has no previous verions alive
-//	// 
-//	// TODO
-//	// make this crash safe
-//	// 
-//	// TODO
-//	// only write W pages, R pages can be ignored, they are up to date
-//	for (uint64_t page_index = 0; page_index < pages_count(&db->root->paged_buffer); page_index++)
-//	{
-//		if (db->root->paged_buffer.map[page_index] == MAP_SLOT_NOT_LOADED)
-//			continue;
-//
-//		uint64_t file_offset = page_index * PAGE_SIZE;
-//		write_page_to_file(db->fd, file_offset, (void*)pointer_of(&db->root->paged_buffer, page_index));
-//	}
-//}
-
-// TODO
-// right now it clones the whole diff buffer
-// instead, it should clone the map only
-// and the map should contain pointers instead
-// so that it can store memory of different allocators
-//TrxR begin_read_transaction(Db* db)
-//{
-//	TrxR trx;
-//	{
-//		trx.fd = db->fd;
-//		trx.root = db->root;
-//	}
-//
-//	return trx;
-//}
-//
-//void end_read_transaction(TrxR * trx)
-//{
-//	// TODO
-//	// implement atomic refcounting
-//	// or threads array
-//	deinit_diff_buffer(&trx->root->paged_buffer);
-//}
