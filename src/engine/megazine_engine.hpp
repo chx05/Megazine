@@ -756,7 +756,7 @@ struct RootsPool
 				for (uint32_t j = 0; j < thread_map_ref->count; j++)
 				{
 					// this is thread safe only as long as there is one write transaction only
-					if (thread_map_ref->buffer[i].acquire().root_in_use == root_ref)
+					if (thread_map_ref->buffer[j].acquire().root_in_use == root_ref)
 					{
 						root_ref_is_still_in_use = true;
 						break;

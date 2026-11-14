@@ -92,8 +92,6 @@ void concurrent_infinite_passive_fn(uint32_t thread_id)
 
 void infinite_writer_fn(uint32_t thread_id)
 {
-    (void)thread_id;
-
     thread_local std::mt19937 gen(std::random_device{}());
     std::uniform_int_distribution<uint64_t> dist(0, 100);
 
@@ -134,8 +132,29 @@ int main()
         //std::thread t1(concurrent_infinite_passive_fn, 1);
         //std::thread t2(concurrent_infinite_passive_fn, 2);
 
-        //std::this_thread::sleep_for(std::chrono::seconds(3));
-        //auto trx = db.trx_w();
+        //std::this_thread::sleep_for(std::chrono::seconds(1));
+        //auto trx = db.trx_w(0);
+        //DEFER_close(trx);
+
+        //auto first_page_mut = (uint64_t*)trx.get_mut_page(0);
+        //first_page_mut[0] = 30;
+
+        //auto first_page = (uint64_t const*)trx.get_page(0);
+        //std::cout << first_page[0] << " " << first_page[1] << "\n";
+
+        ////trx.abort();
+        //trx.close();
+
+        //t1.join();
+        //t2.join();
+    }
+
+    {
+        //std::thread t1(concurrent_infinite_active_fn, 1);
+        //std::thread t2(concurrent_infinite_active_fn, 2);
+
+        //std::this_thread::sleep_for(std::chrono::seconds(1));
+        //auto trx = db.trx_w(0);
         //DEFER_close(trx);
 
         //auto first_page_mut = (uint64_t*)trx.get_mut_page(0);
@@ -162,17 +181,17 @@ int main()
     }
 
     {
-        /*std::thread t1(concurrent_infinite_passive_fn, 1);
-        std::thread t2(concurrent_infinite_passive_fn, 2);
-        std::thread t3(infinite_writer_fn, 3);
+        //std::thread t1(concurrent_infinite_passive_fn, 1);
+        //std::thread t2(concurrent_infinite_passive_fn, 2);
+        //std::thread t3(infinite_writer_fn, 3);
 
-        t1.join();
-        t2.join();
-        t3.join();*/
+        //t1.join();
+        //t2.join();
+        //t3.join();
     }
 
     {
-        /*auto trx = db.trx_r();
+        /*auto trx = db.trx_r(0);
         DEFER_close(trx);
 
         for (uint64_t i = 0; i < trx.pages_count(); i++)
@@ -188,7 +207,7 @@ int main()
     }
 
     {
-        //auto trx = db.trx_w();
+        //auto trx = db.trx_w(0);
         //DEFER_close(trx);
 
         //auto first_page_mut = (uint64_t*)trx.get_mut_page(0);
@@ -201,7 +220,7 @@ int main()
     }
 
     {
-        /*auto trx = db.trx_r();
+        /*auto trx = db.trx_r(0);
         DEFER_close(trx);
 
         auto first_page = (uint64_t const*)trx.get_page(0);
@@ -228,15 +247,6 @@ int main()
         page_content->len = PAGE_SIZE;
         apply_diff_buffer_to_file(&db);*/
     }
-
-    /*trx = begin_read_transaction(&db);
-    {
-        for (uint64_t i = 0; i < trx.diff_buffer.used_map_capacity; i++)
-        {
-            printf("%llu: %.*s\n", i, PAGE_SIZE, get_page(&trx, i));
-        }
-    }
-    end_read_transaction(trx);*/
 
     return 0;
 }
