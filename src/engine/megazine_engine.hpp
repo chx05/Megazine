@@ -713,24 +713,35 @@ struct TrxW
 
 
 // TODO
-// consider the use of alignas(64) which increases throughtput
-// at the cost of wasting 56 bytes for each threadinfo
+// test this without alignment as well
+// since it might not even compile on hw without 16byte atomic ops
 struct ThreadInfo
 {
 	epoch_t current_epoch;
 	Root* root_in_use;
 };
 
+#pragma warning(push)
+#pragma warning(disable : 4324)
+	template<typename T>
+	struct alignas(64) Aligned64
+	{
+		T aligned_value;
+	};
+#pragma warning(pop)
+
 struct ThreadMap
 {
 	uint32_t count;
-	PotentiallyAtomic<ThreadInfo>* buffer;
+	Aligned64<PotentiallyAtomic<ThreadInfo>>* buffer;
 
 	static ThreadMap create(uint32_t count)
 	{
-		auto buffer = new PotentiallyAtomic<ThreadInfo>[count];
+		auto buffer = new Aligned64<PotentiallyAtomic<ThreadInfo>>[count];
 		for (uint64_t i = 0; i < count; i++)
-			buffer[i] = PotentiallyAtomic<ThreadInfo>::create({.current_epoch = EPOCH_NONE, .root_in_use = nullptr});
+			buffer[i] = {
+				.aligned_value = PotentiallyAtomic<ThreadInfo>::create({.current_epoch = EPOCH_NONE, .root_in_use = nullptr})
+			};
 
 		return {
 			.count = count,
@@ -771,7 +782,7 @@ struct RootsPool
 				for (uint32_t j = 0; j < thread_map_ref->count; j++)
 				{
 					// this is thread safe only as long as there is one write transaction only
-					if (thread_map_ref->buffer[j].acquire().root_in_use == root_ref)
+					if (thread_map_ref->buffer[j].aligned_value.acquire().root_in_use == root_ref)
 					{
 						root_ref_is_still_in_use = true;
 						break;
@@ -861,10 +872,20 @@ struct Db
 	TrxR trx_r(thread_id_t thread_id)
 	{
 		auto epoch_stamp = epoch.increment();
-		auto current_root = root.acquire();
-
-		thread_map.buffer[thread_id].release({.current_epoch = epoch_stamp, .root_in_use = current_root});
-
+		auto slot = &thread_map.buffer[thread_id].aligned_value;
+		
+		// take the first root that is not being discarded in that same moment
+		Root* current_root;
+		for (;;)
+		{
+			current_root = root.acquire();
+			// announce
+			slot->store_seq_cst({ .current_epoch = epoch_stamp, .root_in_use = current_root });
+			// if the root changed in between, the writer may have missed the announcement -> retry
+			if (root.load_seq_cst() == current_root)
+				break;
+		}
+		
 		return {
 			.root = current_root,
 			.db_ref = this,
@@ -895,7 +916,7 @@ inline void TrxR::close()
 		return;
 
 	root = nullptr;
-	db_ref->thread_map.buffer[thread_id].release({.current_epoch = EPOCH_NONE});
+	db_ref->thread_map.buffer[thread_id].aligned_value.release({.current_epoch = EPOCH_NONE});
 }
 
 inline TrxW TrxW::create(TrxR trx_r)
@@ -909,23 +930,37 @@ inline TrxW TrxW::create(TrxR trx_r)
 
 inline void TrxW::close()
 {
-	if (status == TrxW_Status::Open)
+	if (status != TrxW_Status::Open)
+		return;
+
+	status = TrxW_Status::Closed;
+
+	// base root is still pinned by our thread slot, so it can't be reclaimed here
+	auto new_root = trx_r.db_ref->roots_pool.alloc_root(&trx_r.db_ref->thread_map);
+	auto base_map = &trx_r.root->paged_buffer.map;
+
+	// merge: copy into the diff every page that the base root has loaded
+	// and that this transaction did not modify
+	for (uint64_t i = 0; i < diffs.map.flags.count; i++)
 	{
-		status = TrxW_Status::Closed;
+		if (diffs.map.flags[i].raw() == PageFlag::loaded)
+			continue; // modified by this transaction, keep it
 
-		// alloc new root and cleanup previous usage, if any
-		auto new_root = trx_r.db_ref->roots_pool.alloc_root(&trx_r.db_ref->thread_map);
-		new_root->drop();
+		if (base_map->flags[i].acquire() != PageFlag::loaded)
+			continue; // untouched, a reader will load it from the file
 
-		// deliberately not dropping diffbuffer
-		*new_root = Root::consume(diffs);
-		trx_r.db_ref->root.swap_acquire_release(new_root);
-
-		// TODO
-		// flushing to .epochN.temp file
-
-		trx_r.close();
+		auto base_page = base_map->refs[i];
+		diffs.alloc_and_map_page(i);
+		std::copy_n(base_page, PAGE_SIZE, diffs.mut_pointer_of(i));
+		*diffs.map.flags[i].raw_mut() = PageFlag::loaded;
 	}
+
+	// deliberately not dropping diffbuffer
+	*new_root = Root::consume(diffs);
+	trx_r.db_ref->root.swap_seq_cst(new_root);
+
+	// release the base root only after publishing
+	trx_r.close();
 }
 
 
