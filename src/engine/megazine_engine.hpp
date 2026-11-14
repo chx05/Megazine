@@ -188,15 +188,12 @@ enum struct PageFlag : uint8_t
 	// only for reader page map
 	loading = 1,
 
-	// for reader page map: means page loaded from disk
-	// for writer page map: means page modified by write transaction
+	// only for reader page map
 	loaded = 2,
 
-	// TODO
-	// add "modified" so when memory is running low the read transaction
-	// can eject some page EXCEPT the ones flagged as modified.
-	// then when the file is finally flushed to the original file
-	// all "modified" pages can be marked to loaded, which qualifies them as ejectable
+	// reader page map: a previous write transaction modified and committed this page
+	// writer page map: current write transaction modified and committed this page
+	modified = 3
 };
 
 using atomic_page_flag_t = PotentiallyAtomic<PageFlag>;
@@ -631,7 +628,7 @@ struct TrxR
 
 		// already in cache?
 		auto current = flag->acquire();
-		if (current == PageFlag::loaded)
+		if (current >= PageFlag::loaded)
 			return root->paged_buffer.pointer_of(page_index);
 
 		// claiming the job
@@ -676,7 +673,7 @@ struct TrxW
 	uint8_t const* get_page(page_index_t page_index)
 	{
 		auto flag = diffs.map.flags[page_index].raw();
-		if (flag == PageFlag::loaded)
+		if (flag == PageFlag::modified)
 			return diffs.map.refs[page_index];
 
 		return trx_r.get_page(page_index);
@@ -685,7 +682,7 @@ struct TrxW
 	uint8_t* get_mut_page(page_index_t page_index)
 	{
 		auto flag = diffs.map.flags[page_index].raw();
-		if (flag == PageFlag::loaded)
+		if (flag == PageFlag::modified)
 			return diffs.map.refs[page_index];
 
 		auto real_page = trx_r.get_page(page_index);
@@ -693,7 +690,7 @@ struct TrxW
 		diffs.alloc_and_map_page(page_index);
 		auto diff_page = diffs.mut_pointer_of(page_index);
 		std::copy_n(real_page, PAGE_SIZE, diff_page);
-		*diffs.map.flags[page_index].raw_mut() = PageFlag::loaded;
+		*diffs.map.flags[page_index].raw_mut() = PageFlag::modified;
 
 		return diff_page;
 	}
@@ -943,16 +940,16 @@ inline void TrxW::close()
 	// and that this transaction did not modify
 	for (uint64_t i = 0; i < diffs.map.flags.count; i++)
 	{
-		if (diffs.map.flags[i].raw() == PageFlag::loaded)
+		if (diffs.map.flags[i].raw() == PageFlag::modified)
 			continue; // modified by this transaction, keep it
 
-		if (base_map->flags[i].acquire() != PageFlag::loaded)
-			continue; // untouched, a reader will load it from the file
+		if (base_map->flags[i].acquire() != PageFlag::modified)
+			continue; // never modified, a reader will load it from the file
 
 		auto base_page = base_map->refs[i];
 		diffs.alloc_and_map_page(i);
 		std::copy_n(base_page, PAGE_SIZE, diffs.mut_pointer_of(i));
-		*diffs.map.flags[i].raw_mut() = PageFlag::loaded;
+		*diffs.map.flags[i].raw_mut() = PageFlag::modified;
 	}
 
 	// deliberately not dropping diffbuffer
