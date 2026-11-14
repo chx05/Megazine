@@ -58,6 +58,21 @@ struct PotentiallyAtomic
 		return get_as_atomic().load(std::memory_order_relaxed);
 	}
 
+	T load_seq_cst()
+	{
+		return get_as_atomic().load(std::memory_order_seq_cst);
+	}
+
+	void store_seq_cst(T v)
+	{
+		get_as_atomic().store(v, std::memory_order_seq_cst);
+	}
+
+	T swap_seq_cst(T v)
+	{
+		return get_as_atomic().exchange(v, std::memory_order_seq_cst);
+	}
+
 	void release(T new_value)
 	{
 		return get_as_atomic().store(new_value, std::memory_order_release);
@@ -848,7 +863,7 @@ struct Db
 		auto epoch_stamp = epoch.increment();
 		auto current_root = root.acquire();
 
-		this->thread_map.buffer[thread_id].release({.current_epoch = epoch_stamp, .root_in_use = current_root});
+		thread_map.buffer[thread_id].release({.current_epoch = epoch_stamp, .root_in_use = current_root});
 
 		return {
 			.root = current_root,
@@ -908,6 +923,8 @@ inline void TrxW::close()
 
 		// TODO
 		// flushing to .epochN.temp file
+
+		trx_r.close();
 	}
 }
 
