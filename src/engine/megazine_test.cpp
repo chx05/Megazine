@@ -128,7 +128,7 @@ void dump_db(thread_id_t thread_id)
 
 int main()
 {
-    db = Db::open("test", 50);
+    db = Db::open("test2", 1);
     DEFER_close(db);
 
     {
