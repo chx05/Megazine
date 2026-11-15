@@ -65,7 +65,7 @@ std::array<User, NUM_USERS> generate_users()
     return users;
 }
 
-int main()
+int bench_main()
 {
     constexpr char const* DB_PATH = "test2";
     constexpr thread_id_t THREAD_ID = 0;
