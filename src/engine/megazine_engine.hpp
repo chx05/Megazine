@@ -1,6 +1,9 @@
 #pragma once
 
-#define NOMINMAX
+#ifndef NOMINMAX
+	#define NOMINMAX
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <windows.h>
@@ -764,10 +767,10 @@ struct TrxW
 // TODO
 // test this without alignment as well
 // since it might not even compile on hw without 16byte atomic ops
-struct ThreadInfo
+struct AtomicThreadInfo
 {
-	epoch_t current_epoch;
-	Root* root_in_use;
+	PotentiallyAtomic<epoch_t> current_epoch;
+	PotentiallyAtomic<Root*> root_in_use;
 };
 
 #pragma warning(push)
@@ -782,14 +785,17 @@ struct ThreadInfo
 struct ThreadMap
 {
 	uint32_t count;
-	Aligned64<PotentiallyAtomic<ThreadInfo>>* buffer;
+	Aligned64<AtomicThreadInfo>* buffer;
 
 	static ThreadMap create(uint32_t count)
 	{
-		auto buffer = new Aligned64<PotentiallyAtomic<ThreadInfo>>[count];
+		auto buffer = new Aligned64<AtomicThreadInfo>[count];
 		for (uint64_t i = 0; i < count; i++)
 			buffer[i] = {
-				.aligned_value = PotentiallyAtomic<ThreadInfo>::create({.current_epoch = EPOCH_NONE, .root_in_use = nullptr})
+				.aligned_value = {
+					.current_epoch = PotentiallyAtomic<epoch_t>::create(EPOCH_NONE),
+					.root_in_use = PotentiallyAtomic<Root*>::create(nullptr)
+				}
 			};
 
 		return {
@@ -831,7 +837,7 @@ struct RootsPool
 				for (uint32_t j = 0; j < thread_map_ref->count; j++)
 				{
 					// this is thread safe only as long as there is one write transaction only
-					if (thread_map_ref->buffer[j].aligned_value.acquire().root_in_use == root_ref)
+					if (thread_map_ref->buffer[j].aligned_value.root_in_use.acquire() == root_ref)
 					{
 						root_ref_is_still_in_use = true;
 						break;
@@ -932,7 +938,8 @@ struct Db
 		{
 			current_root = root.acquire();
 			// announce
-			slot->store_seq_cst({ .current_epoch = epoch_stamp, .root_in_use = current_root });
+			slot->current_epoch.store_seq_cst(epoch_stamp);
+			slot->root_in_use.store_seq_cst(current_root);
 			// if the root changed in between, the writer may have missed the announcement -> retry
 			if (root.load_seq_cst() == current_root)
 				break;
@@ -968,7 +975,9 @@ inline void TrxR::close()
 		return;
 
 	root = nullptr;
-	db_ref->thread_map.buffer[thread_id].aligned_value.release({.current_epoch = EPOCH_NONE});
+	auto slot = &db_ref->thread_map.buffer[thread_id].aligned_value;
+	slot->current_epoch.release(EPOCH_NONE);
+	slot->root_in_use.release(nullptr);
 }
 
 inline TrxW TrxW::create(TrxR trx_r)

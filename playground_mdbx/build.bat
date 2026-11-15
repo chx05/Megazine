@@ -1,1 +1,1 @@
-@gcc main.c -I. -L. -lmdbx -lntdll -lwinmm -pthread -o myprog.exe
+@g++ main.cpp -I. -L. -lmdbx -lntdll -lwinmm -pthread -o myprog.exe -O3 -DNDEBUG

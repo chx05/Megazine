@@ -1,0 +1,1 @@
+@g++ megazine_bench.cpp -I. -L. -lntdll -lwinmm -pthread -std=c++20 -o myprog.exe -O3 -DNDEBUG
