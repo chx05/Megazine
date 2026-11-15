@@ -151,7 +151,7 @@
     <ClCompile Include="megazine_test.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="build.bat" />
+    <None Include="build_bench.bat" />
     <None Include="test" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
