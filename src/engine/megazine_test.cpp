@@ -126,7 +126,7 @@ void dump_db(thread_id_t thread_id)
     }
 }
 
-int main_x()
+int __main()
 {
     db = Db::open("test2", 1);
     DEFER_close(db);

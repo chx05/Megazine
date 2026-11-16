@@ -22,8 +22,8 @@ static_assert(sizeof(User) == 16);
 static_assert(std::is_trivially_copyable_v<User>);
 
 constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 100;
-constexpr size_t NUM_QUERIES = 1000000;
+constexpr size_t NUM_USERS = 100000;
+constexpr size_t NUM_QUERIES = 100;
 
 inline void check_mdbx(int rc, char const* op)
 {
@@ -101,7 +101,7 @@ int main()
     MdbxEnvGuard env_guard;
     check_mdbx(mdbx_env_create(&env_guard.env), "mdbx_env_create");
     check_mdbx(
-        mdbx_env_open(env_guard.env, DB_PATH, MDBX_NOSUBDIR, 0664),
+        mdbx_env_open(env_guard.env, DB_PATH, MDBX_NOSUBDIR | MDBX_EXCLUSIVE, 0664),
         "mdbx_env_open");
 
     MDBX_dbi dbi = 0;
@@ -188,7 +188,10 @@ int main()
               << "  avg magic:      " << last_avg << " (checksum=" << checksum << ")\n"
               << "  write (100):    " << write_us / 1000.0 << " ms (" << write_us << " us)\n"
               << "  read (1000x):   " << read_us / 1000.0 << " ms (" << read_us / NUM_QUERIES << " us/query)\n"
-              << "  total:          " << (write_us + read_us) / 1000.0 << " ms\n";
+              << "  total:          " << (write_us + read_us) / 1000.0 << " ms\n"
+              << '\n'
+              << "mdbx options: " << (mdbx_build.options ? mdbx_build.options : "(null)") << '\n'
+              << "mdbx flags:   " << (mdbx_build.flags   ? mdbx_build.flags   : "(null)") << '\n';
 
     return 0;
 }

@@ -207,12 +207,12 @@ using epoch_t = uint64_t;
 using page_index_t = uint64_t;
 using thread_id_t = uint32_t;
 
-constexpr uint64_t PAGE_SIZE = 16;
+constexpr uint64_t PAGE_SIZE = 4096;
 constexpr uint64_t INITIAL_MIN_PAGES_COUNT = 10;
 constexpr uint64_t INITIAL_MIN_DIFF_PAGES_COUNT = 10;
 constexpr uint64_t INITIAL_ROOTS_POOL_CAPACITY = 5;
 
-constexpr epoch_t EPOCH_NONE = (epoch_t)4611686018427387903; // 2^62 - 1 (see ThreadInfo, its 62 bits not 64)
+constexpr epoch_t EPOCH_NONE = (epoch_t)-1;
 
 inline bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void* dest_buffer)
 {
