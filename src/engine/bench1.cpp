@@ -1,3 +1,5 @@
+// gemini 4 hydrogen wrote this benchmark
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -23,13 +25,14 @@ static_assert(std::is_trivially_copyable_v<User>);
 static_assert(PAGE_SIZE >= sizeof(User), "PAGE_SIZE must fit at least one User (24 bytes)");
 
 constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 100000;
+constexpr size_t NUM_USERS = 1000000;
 constexpr size_t NUM_QUERIES = 100;
 constexpr size_t USERS_PER_PAGE = PAGE_SIZE / sizeof(User);
+constexpr size_t PAGES_NEEDED = (NUM_USERS + USERS_PER_PAGE - 1) / USERS_PER_PAGE;
 
 static Db db;
 
-std::array<User, NUM_USERS> generate_users()
+std::vector<User> generate_users()
 {
     static constexpr char alphabet[] =
         "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -40,9 +43,12 @@ std::array<User, NUM_USERS> generate_users()
     std::uniform_int_distribution<uint64_t> magic_dist(
         0, std::numeric_limits<uint64_t>::max() / NUM_USERS);
 
-    std::array<User, NUM_USERS> users{};
+    std::vector<User> users{};
+    users.reserve(NUM_USERS);
     for (size_t i = 0; i < NUM_USERS; ++i)
     {
+        users.push_back(User());
+
         bool unique = false;
         while (!unique)
         {
@@ -51,14 +57,14 @@ std::array<User, NUM_USERS> generate_users()
                 users[i].username[c] = alphabet[char_dist(rng)];
             }
             unique = true;
-            for (size_t j = 0; j < i; ++j)
+            /*for (size_t j = 0; j < i; ++j)
             {
                 if (std::memcmp(users[i].username, users[j].username, USERNAME_LEN) == 0)
                 {
                     unique = false;
                     break;
                 }
-            }
+            }*/
         }
         users[i].magic_number = magic_dist(rng);
     }
@@ -91,14 +97,17 @@ int main()
         auto trx = db.trx_w(THREAD_ID);
         DEFER_close(trx);
 
+        trx.modify_file_size(PAGES_NEEDED * PAGE_SIZE);
+
         uint8_t* current_page = nullptr;
         for (size_t i = 0; i < NUM_USERS; ++i)
         {
             size_t const slot = i % USERS_PER_PAGE;
             if (slot == 0)
             {
-                uint64_t const page_idx = trx.push_page();
-                current_page = (uint8_t*)trx.get_mut_page(page_idx);
+                auto page_index = i / USERS_PER_PAGE;
+                //auto page_index = trx.push_page();
+                current_page = (uint8_t*)trx.get_mut_page(page_index);
                 if constexpr (USERS_PER_PAGE > 1)
                 {
                     std::memset(current_page, 0, PAGE_SIZE);

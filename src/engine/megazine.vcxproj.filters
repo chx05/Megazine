@@ -15,7 +15,7 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="megazine_bench.cpp">
+    <ClCompile Include="bench1.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="megazine_engine.hpp">
@@ -25,6 +25,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="megazine_test.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="bench2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

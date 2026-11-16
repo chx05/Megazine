@@ -145,8 +145,9 @@
     </Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="bench2.cpp" />
     <ClCompile Include="megazine_engine.cpp" />
-    <ClCompile Include="megazine_bench.cpp" />
+    <ClCompile Include="bench1.cpp" />
     <ClCompile Include="megazine_engine.hpp" />
     <ClCompile Include="megazine_test.cpp" />
   </ItemGroup>
