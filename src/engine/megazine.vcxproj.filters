@@ -27,7 +27,10 @@
     <ClCompile Include="megazine_test.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="bench2.cpp">
+    <ClCompile Include="bench2a.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="bench2b.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
