@@ -21,7 +21,7 @@ struct User
     uint64_t magic_number;
 };
 
-constexpr uint64_t PAGE_SIZE = 4096;
+constexpr uint64_t PAGE_SIZE = 8192;
 
 static_assert(sizeof(User) == 16);
 static_assert(std::is_trivially_copyable_v<User>);

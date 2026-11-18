@@ -15,7 +15,7 @@
 
 #include "megazine_engine.hpp"
 
-constexpr uint64_t PAGE_SIZE = 4096;
+constexpr uint64_t PAGE_SIZE = 8192;
 
 constexpr size_t USERNAME_LEN = 8;
 constexpr size_t NUM_USERS = 1000000;
