@@ -1,4 +1,5 @@
-// page-based B+Tree benchmark for megazine
+// gemini 4 hydrogen wrote this benchmark
+// btree username lookup
 
 #include <chrono>
 #include <cstdint>
@@ -12,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "megazine_engine.hpp"
+#include "megazine_engine.cpp"
 
 constexpr size_t USERNAME_LEN = 8;
 constexpr size_t NUM_USERS = 1000000;
@@ -500,7 +501,7 @@ std::vector<User> generate_users()
     return users;
 }
 
-int main()
+int main_2b()
 {
     constexpr char const* DB_PATH = "test2_btree";
     constexpr thread_id_t THREAD_ID = 0;

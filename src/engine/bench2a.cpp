@@ -1,4 +1,5 @@
 // gemini 4 hydrogen wrote this benchmark
+// hashmap username lookup
 
 #include <algorithm>
 #include <chrono>
@@ -13,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#include "megazine_engine.hpp"
+#include "megazine_engine.cpp"
 
 constexpr size_t USERNAME_LEN = 8;
 constexpr size_t NUM_USERS = 1000000;
@@ -308,7 +309,7 @@ std::vector<User> generate_users()
     return users;
 }
 
-int main()
+int main_2a()
 {
     constexpr char const* DB_PATH = "test2_soamap";
     constexpr thread_id_t THREAD_ID = 0;

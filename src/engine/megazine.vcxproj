@@ -147,9 +147,8 @@
   <ItemGroup>
     <ClCompile Include="bench2a.cpp" />
     <ClCompile Include="bench2b.cpp" />
-    <ClCompile Include="megazine_engine.cpp" />
     <ClCompile Include="bench1.cpp" />
-    <ClCompile Include="megazine_engine.hpp" />
+    <ClCompile Include="megazine_engine.cpp" />
     <ClCompile Include="megazine_test.cpp" />
   </ItemGroup>
   <ItemGroup>

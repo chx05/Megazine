@@ -1,4 +1,5 @@
 // gemini 4 hydrogen wrote this benchmark
+// list full scan
 
 #include <array>
 #include <chrono>
@@ -12,7 +13,7 @@
 #include <string_view>
 #include <type_traits>
 
-#include "megazine_engine.hpp"
+#include "megazine_engine.cpp"
 
 struct User
 {
@@ -71,7 +72,7 @@ std::vector<User> generate_users()
     return users;
 }
 
-int main()
+int main_1()
 {
     constexpr char const* DB_PATH = "test2";
     constexpr thread_id_t THREAD_ID = 0;

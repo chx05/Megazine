@@ -2,7 +2,8 @@
 #include <syncstream>
 #include <thread>
 #include <random>
-#include "megazine_engine.hpp"
+
+#include "megazine_engine.cpp"
 
 // this is what a fat pointer should look like
 // when stored in the db
@@ -126,7 +127,7 @@ void dump_db(thread_id_t thread_id)
     }
 }
 
-int __main()
+int main()
 {
     db = Db::open("test2", 1);
     DEFER_close(db);
@@ -254,15 +255,6 @@ int __main()
 
     std::cout << "TrxR sees: " << '\n';
     dump_db(0);
-
-    // unsafe page manipulation
-    {
-        /*alloc_and_map_page(&db.readonly_base, 0);
-        struct db_handle* page_content = (struct db_handle*)pointer_of(&db.readonly_base, 0);
-        page_content->offset = 20;
-        page_content->len = PAGE_SIZE;
-        apply_diff_buffer_to_file(&db);*/
-    }
 
     return 0;
 }

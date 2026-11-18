@@ -13,25 +13,25 @@
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
       <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
     </Filter>
+    <Filter Include="Benchmarks">
+      <UniqueIdentifier>{2f3069b9-bc95-48ef-be8e-d76d2040542f}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="bench1.cpp">
+    <ClCompile Include="megazine_test.cpp">
       <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="megazine_engine.hpp">
-      <Filter>Header Files</Filter>
     </ClCompile>
     <ClCompile Include="megazine_engine.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="megazine_test.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="bench2b.cpp">
+      <Filter>Benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="bench1.cpp">
+      <Filter>Benchmarks</Filter>
     </ClCompile>
     <ClCompile Include="bench2a.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="bench2b.cpp">
-      <Filter>Source Files</Filter>
+      <Filter>Benchmarks</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -39,7 +39,7 @@
       <Filter>Resource Files</Filter>
     </None>
     <None Include="build_bench.bat">
-      <Filter>Source Files</Filter>
+      <Filter>Benchmarks</Filter>
     </None>
   </ItemGroup>
 </Project>
