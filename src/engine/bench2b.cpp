@@ -13,7 +13,9 @@
 #include <utility>
 #include <vector>
 
-#include "megazine_engine.cpp"
+#include "megazine_engine.hpp"
+
+constexpr uint64_t PAGE_SIZE = 4096;
 
 constexpr size_t USERNAME_LEN = 8;
 constexpr size_t NUM_USERS = 1000000;
@@ -501,7 +503,7 @@ std::vector<User> generate_users()
     return users;
 }
 
-int main_2b()
+int main()
 {
     constexpr char const* DB_PATH = "test2_btree";
     constexpr thread_id_t THREAD_ID = 0;
@@ -517,7 +519,7 @@ int main_2b()
     }
     uint64_t const expected_avg = expected_sum / NUM_USERS;
 
-    db = Db::open(DB_PATH, 1);
+    db = Db::open(DB_PATH, 1, { .page_size = PAGE_SIZE });
     DEFER_close(db);
 
     // 1) Write phase: populate B+Tree

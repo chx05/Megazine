@@ -3,7 +3,9 @@
 #include <thread>
 #include <random>
 
-#include "megazine_engine.cpp"
+#include "megazine_engine.hpp"
+
+constexpr uint64_t PAGE_SIZE = 16;
 
 // this is what a fat pointer should look like
 // when stored in the db
@@ -129,7 +131,7 @@ void dump_db(thread_id_t thread_id)
 
 int main()
 {
-    db = Db::open("test2", 1);
+    db = Db::open("test2", 1, { .page_size = PAGE_SIZE });
     DEFER_close(db);
 
     {

@@ -207,14 +207,18 @@ using epoch_t = uint64_t;
 using page_index_t = uint64_t;
 using thread_id_t = uint32_t;
 
-constexpr uint64_t PAGE_SIZE = 4096;
-constexpr uint64_t INITIAL_MIN_PAGES_COUNT = 10;
-constexpr uint64_t INITIAL_MIN_DIFF_PAGES_COUNT = 10;
-constexpr uint64_t INITIAL_ROOTS_POOL_CAPACITY = 5;
-
 constexpr epoch_t EPOCH_NONE = (epoch_t)-1;
 
-inline bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void* dest_buffer)
+struct DbConfig
+{
+	uint64_t page_size = 4096;
+	// TODO, use these
+	uint64_t initial_pages_capacity_reader = 10;
+	uint64_t initial_pages_capacity_writer = 10;
+	uint64_t initial_roots_pool_capacity = 5;
+};
+
+bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void* dest_buffer, DbConfig const* config)
 {
 	OVERLAPPED ov = { 0 };
 	ov.Offset = (DWORD)(file_offset);
@@ -224,7 +228,7 @@ inline bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void
 		return false;
 
 	DWORD bytes = 0;
-	BOOL ok = ReadFile(fd, dest_buffer, (DWORD)PAGE_SIZE, &bytes, &ov);
+	BOOL ok = ReadFile(fd, dest_buffer, (DWORD)config->page_size, &bytes, &ov);
 	if (!ok)
 	{
 		if (GetLastError() == ERROR_IO_PENDING)
@@ -235,18 +239,18 @@ inline bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void
 	}
 
 	CloseHandle(ov.hEvent);
-	return ok && (bytes == PAGE_SIZE);
+	return ok && (bytes == config->page_size);
 }
 
 // TODO this must be ported to async as well like read_page_from_file
-inline bool write_page_to_file(file_descriptor_t fd, uint64_t file_offset, void const* source_buffer)
+bool write_page_to_file(file_descriptor_t fd, uint64_t file_offset, void const* source_buffer, DbConfig const* config)
 {
 	OVERLAPPED ov = { 0 };
 	ov.Offset = (DWORD)(file_offset);
 	ov.OffsetHigh = (DWORD)(file_offset >> 32);
 
 	DWORD bytes = 0;
-	return WriteFile(fd, source_buffer, (DWORD)PAGE_SIZE, &bytes, &ov);
+	return WriteFile(fd, source_buffer, (DWORD)config->page_size, &bytes, &ov);
 }
 
 template<typename T>
@@ -304,7 +308,7 @@ struct Arena
 template<typename T>
 struct StableArena_BufferNode
 {
-	PotentiallyAtomic<uint32_t> len;
+	PotentiallyAtomic<uint64_t> len;
 	T* buffer;
 	StableArena_BufferNode* previous_node;
 };
@@ -312,10 +316,10 @@ struct StableArena_BufferNode
 template<typename T>
 struct StableArena
 {
-	uint32_t capacity_per_node = 0;
+	uint64_t capacity_per_node = 0;
 	PotentiallyAtomic<StableArena_BufferNode<T>*> last_node;
 
-	static StableArena<T> create(uint32_t max_capacity_per_node)
+	static StableArena<T> create(uint64_t max_capacity_per_node)
 	{
 		assert(max_capacity_per_node > 0);
 		return {
@@ -339,7 +343,7 @@ struct StableArena
 		{
 			// if .drop() is avaiable, i call it
 			if constexpr (requires { node->buffer[0].drop(); }) {
-				for (uint32_t i = 0; i < node->len.raw(); i++)
+				for (auto i = 0; i < node->len.raw(); i++)
 					node->buffer[i].drop();
 			}
 			// if it is available but with wrong signature, print error instead of silent ignore
@@ -355,14 +359,14 @@ struct StableArena
 		}
 	}
 
-	T* concurrent_alloc_many(uint32_t requested_count)
+	T* concurrent_alloc_many(uint64_t requested_count)
 	{
 		assert(requested_count <= capacity_per_node);
 
 		while (true)
 		{
 			auto node = last_node.acquire();
-			uint32_t offset = node->len.load_relaxed();
+			auto offset = node->len.load_relaxed();
 
 			// allocate in last_node if there is space
 			while (offset + requested_count <= capacity_per_node)
@@ -398,7 +402,7 @@ struct StableArena
 		}
 	}
 
-	T* non_concurrent_alloc_many(uint32_t requested_count)
+	T* non_concurrent_alloc_many(uint64_t requested_count)
 	{
 		assert(requested_count <= capacity_per_node);
 		assert(last_node.raw() != nullptr);
@@ -429,9 +433,9 @@ struct Writer_PageMap
 	Arena<page_ref_t> refs;
 	Arena<atomic_page_flag_t> flags;
 
-	static Writer_PageMap create(uint64_t file_size)
+	static Writer_PageMap create(uint64_t file_size, DbConfig const* config)
 	{
-		uint64_t initial_capacity = file_size / PAGE_SIZE;
+		uint64_t initial_capacity = file_size / config->page_size;
 
 		auto refs = Arena<page_ref_t>::create(initial_capacity);
 		refs.count = initial_capacity;
@@ -475,9 +479,9 @@ struct Reader_PageMap
 	page_ref_t* refs = nullptr;
 	atomic_page_flag_t* flags = nullptr;
 
-	static Reader_PageMap create(uint64_t file_size)
+	static Reader_PageMap create(uint64_t file_size, DbConfig const* config)
 	{
-		uint64_t count = file_size / PAGE_SIZE;
+		uint64_t count = file_size / config->page_size;
 		auto refs = new page_ref_t[count];
 		auto flags = new atomic_page_flag_t[count];
 
@@ -525,11 +529,11 @@ struct PagedBuffer
 	StableArena<uint8_t> arena;
 	Reader_PageMap map;
 
-	static PagedBuffer create(uint64_t file_size)
+	static PagedBuffer create(uint64_t file_size, DbConfig const* config)
 	{
 		return {
-			.arena = StableArena<uint8_t>::create(PAGE_SIZE * INITIAL_MIN_PAGES_COUNT),
-			.map = Reader_PageMap::create(file_size),
+			.arena = StableArena<uint8_t>::create(config->page_size * config->initial_pages_capacity_reader),
+			.map = Reader_PageMap::create(file_size, config),
 		};
 	}
 
@@ -544,14 +548,14 @@ struct PagedBuffer
 		return map.count;
 	}
 
-	void concurrent_alloc_and_map_page(page_index_t page_index)
+	void concurrent_alloc_and_map_page(page_index_t page_index, DbConfig const* config)
 	{
-		map.refs[page_index] = (page_ref_t)arena.concurrent_alloc_many(PAGE_SIZE);
+		map.refs[page_index] = (page_ref_t)arena.concurrent_alloc_many(config->page_size);
 	}
 
-	void non_concurrent_alloc_and_map_page(page_index_t page_index)
+	void non_concurrent_alloc_and_map_page(page_index_t page_index, DbConfig const* config)
 	{
-		map.refs[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(PAGE_SIZE);
+		map.refs[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(config->page_size);
 	}
 
 	uint8_t const* pointer_of(page_index_t page_index)
@@ -565,11 +569,11 @@ struct DiffBuffer
 	StableArena<uint8_t> arena;
 	Writer_PageMap map;
 
-	static DiffBuffer create(uint64_t file_size)
+	static DiffBuffer create(uint64_t file_size, DbConfig const* config)
 	{
 		return {
-			.arena = StableArena<uint8_t>::create(PAGE_SIZE * INITIAL_MIN_DIFF_PAGES_COUNT),
-			.map = Writer_PageMap::create(file_size),
+			.arena = StableArena<uint8_t>::create(config->page_size * config->initial_pages_capacity_writer),
+			.map = Writer_PageMap::create(file_size, config),
 		};
 	}
 
@@ -584,9 +588,9 @@ struct DiffBuffer
 		return map.flags.count;
 	}
 
-	void alloc_and_map_page(page_index_t page_index)
+	void alloc_and_map_page(page_index_t page_index, DbConfig const* config)
 	{
-		map.refs[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(PAGE_SIZE);
+		map.refs[page_index] = (page_ref_t)arena.non_concurrent_alloc_many(config->page_size);
 	}
 
 	uint8_t const* pointer_of(page_index_t page_index)
@@ -604,10 +608,10 @@ struct Root
 {
 	PagedBuffer paged_buffer;
 
-	static Root create(uint64_t file_size)
+	static Root create(uint64_t file_size, DbConfig const* config)
 	{
 		return {
-			.paged_buffer = PagedBuffer::create(file_size),
+			.paged_buffer = PagedBuffer::create(file_size, config),
 		};
 	}
 
@@ -670,6 +674,13 @@ struct TrxR
 		return root->paged_buffer.map.count;
 	}
 
+	uint64_t page_size() const
+	{
+		return db_config()->page_size;
+	}
+
+	DbConfig const* db_config() const;
+
 	void close();
 };
 
@@ -689,7 +700,7 @@ struct TrxW
 
 	uint64_t file_size() const
 	{
-		return pages_count() * PAGE_SIZE;
+		return pages_count() * page_size();
 	}
 
 	uint8_t const* get_page(page_index_t page_index)
@@ -709,32 +720,39 @@ struct TrxW
 
 		auto real_page = trx_r.get_page(page_index);
 
-		diffs.alloc_and_map_page(page_index);
+		diffs.alloc_and_map_page(page_index, db_config());
 		auto diff_page = diffs.mut_pointer_of(page_index);
-		std::copy_n(real_page, PAGE_SIZE, diff_page);
+		std::copy_n(real_page, page_size(), diff_page);
 		*diffs.map.flags[page_index].raw_mut() = PageFlag::modified;
 
 		return diff_page;
 	}
 
+	uint64_t page_size() const
+	{
+		return db_config()->page_size;
+	}
+
+	DbConfig const* db_config() const;
+
 	page_index_t push_page()
 	{
-		modify_file_size(file_size() + PAGE_SIZE);
+		modify_file_size(file_size() + page_size());
 		return pages_count() - 1;
 	}
 
 	void pop_page()
 	{
-		modify_file_size(file_size() - PAGE_SIZE);
+		modify_file_size(file_size() - page_size());
 	}
 
 	void modify_file_size(uint64_t new_file_size)
 	{
 		assert(new_file_size > 0);
-		assert(new_file_size % PAGE_SIZE == 0);
+		assert(new_file_size % page_size() == 0);
 
 		auto previous_pages_count = diffs.count();
-		auto new_pages_count = new_file_size / PAGE_SIZE;
+		auto new_pages_count = new_file_size / page_size();
 
 		if (new_pages_count > previous_pages_count)
 			diffs.map.ensure_capacity(new_pages_count);
@@ -745,7 +763,7 @@ struct TrxW
 		// alloc and update default flag to new uninitialized space
 		for (uint64_t i = previous_pages_count; i < new_pages_count; i++)
 		{
-			diffs.alloc_and_map_page(i);
+			diffs.alloc_and_map_page(i, db_config());
 			diffs.map.flags[i] = atomic_page_flag_t::create(PageFlag::modified);
 		}
 	}
@@ -784,13 +802,13 @@ struct AtomicThreadInfo
 
 struct ThreadMap
 {
-	uint32_t count;
+	uint64_t count;
 	Aligned64<AtomicThreadInfo>* buffer;
 
-	static ThreadMap create(uint32_t count)
+	static ThreadMap create(uint64_t count)
 	{
 		auto buffer = new Aligned64<AtomicThreadInfo>[count];
-		for (uint64_t i = 0; i < count; i++)
+		for (auto i = 0; i < count; i++)
 			buffer[i] = {
 				.aligned_value = {
 					.current_epoch = PotentiallyAtomic<epoch_t>::create(EPOCH_NONE),
@@ -813,10 +831,10 @@ struct RootsPool
 {
 	StableArena<Root> pool;
 
-	static RootsPool create()
+	static RootsPool create(DbConfig const* config)
 	{
 		return {
-			.pool = StableArena<Root>::create(INITIAL_ROOTS_POOL_CAPACITY)
+			.pool = StableArena<Root>::create(config->initial_roots_pool_capacity)
 		};
 	}
 
@@ -830,11 +848,11 @@ struct RootsPool
 		auto node = pool.last_node.raw();
 		while (node != nullptr)
 		{
-			for (uint32_t i = 0; i < node->len.raw(); i++)
+			for (auto i = 0; i < node->len.raw(); i++)
 			{
 				auto root_ref = &node->buffer[i];
 				bool root_ref_is_still_in_use = false;
-				for (uint32_t j = 0; j < thread_map_ref->count; j++)
+				for (auto j = 0; j < thread_map_ref->count; j++)
 				{
 					// this is thread safe only as long as there is one write transaction only
 					if (thread_map_ref->buffer[j].aligned_value.root_in_use.acquire() == root_ref)
@@ -863,9 +881,9 @@ struct RootsPool
 	}
 };
 
-
 struct Db
 {
+	DbConfig config;
 	char const* filename;
 	file_descriptor_t fd = INVALID_HANDLE_VALUE;
 	
@@ -875,7 +893,7 @@ struct Db
 
 	ThreadMap thread_map;
 
-	static Db open(char const* filename, uint32_t threads_count)
+	static Db open(char const* filename, uint32_t threads_count, DbConfig config)
 	{
 		auto fd = CreateFileA(
 			filename,
@@ -892,11 +910,12 @@ struct Db
 		auto file_size = (uint64_t)file_size_result.QuadPart;
 
 		auto thread_map = ThreadMap::create(threads_count);
-		auto roots_pool = RootsPool::create();
+		auto roots_pool = RootsPool::create(&config);
 		auto first_root = roots_pool.alloc_root(&thread_map);
-		*first_root = Root::create(file_size);
+		*first_root = Root::create(file_size, &config);
 
 		return {
+			.config = config,
 			.filename = filename,
 			.fd = fd,
 			.roots_pool = roots_pool,
@@ -908,7 +927,7 @@ struct Db
 
 	uint64_t file_size()
 	{
-		return root.acquire()->paged_buffer.count() * PAGE_SIZE;
+		return root.acquire()->paged_buffer.count() * config.page_size;
 	}
 
 	void close()
@@ -962,14 +981,19 @@ struct Db
 
 
 
-inline void TrxR::load_page(page_index_t page_index)
+void TrxR::load_page(page_index_t page_index)
 {
-	root->paged_buffer.concurrent_alloc_and_map_page(page_index);
-	uint64_t file_offset = page_index * PAGE_SIZE;
-	read_page_from_file(db_ref->fd, file_offset, (void*)root->paged_buffer.pointer_of(page_index));
+	root->paged_buffer.concurrent_alloc_and_map_page(page_index, db_config());
+	uint64_t file_offset = page_index * page_size();
+	read_page_from_file(db_ref->fd, file_offset, (void*)root->paged_buffer.pointer_of(page_index), db_config());
 }
 
-inline void TrxR::close()
+DbConfig const* TrxR::db_config() const
+{
+	return &db_ref->config;
+}
+
+void TrxR::close()
 {
 	if (root == nullptr)
 		return;
@@ -980,16 +1004,21 @@ inline void TrxR::close()
 	slot->root_in_use.release(nullptr);
 }
 
-inline TrxW TrxW::create(TrxR trx_r)
+TrxW TrxW::create(TrxR trx_r)
 {
 	return {
 		.status = TrxW_Status::Open,
 		.trx_r = trx_r,
-		.diffs = DiffBuffer::create(trx_r.db_ref->file_size()),
+		.diffs = DiffBuffer::create(trx_r.db_ref->file_size(), trx_r.db_config()),
 	};
 }
 
-inline void TrxW::close()
+DbConfig const* TrxW::db_config() const
+{
+	return &trx_r.db_ref->config;
+}
+
+void TrxW::close()
 {
 	if (status != TrxW_Status::Open)
 		return;
@@ -1011,8 +1040,8 @@ inline void TrxW::close()
 			continue; // never modified, a reader will load it from the file
 
 		auto base_page = base_map->refs[i];
-		diffs.alloc_and_map_page(i);
-		std::copy_n(base_page, PAGE_SIZE, diffs.mut_pointer_of(i));
+		diffs.alloc_and_map_page(i, db_config());
+		std::copy_n(base_page, page_size(), diffs.mut_pointer_of(i));
 		*diffs.map.flags[i].raw_mut() = PageFlag::modified;
 	}
 

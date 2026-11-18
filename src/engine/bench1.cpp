@@ -13,13 +13,15 @@
 #include <string_view>
 #include <type_traits>
 
-#include "megazine_engine.cpp"
+#include "megazine_engine.hpp"
 
 struct User
 {
     char username[8];
     uint64_t magic_number;
 };
+
+constexpr uint64_t PAGE_SIZE = 4096;
 
 static_assert(sizeof(User) == 16);
 static_assert(std::is_trivially_copyable_v<User>);
@@ -72,7 +74,7 @@ std::vector<User> generate_users()
     return users;
 }
 
-int main_1()
+int main()
 {
     constexpr char const* DB_PATH = "test2";
     constexpr thread_id_t THREAD_ID = 0;
@@ -89,7 +91,7 @@ int main_1()
     uint64_t const expected_avg = expected_sum / NUM_USERS;
 
     // 1 thread slot since everything runs sequentially on thread_id = 0
-    db = Db::open(DB_PATH, 1);
+    db = Db::open(DB_PATH, 1, { .page_size = PAGE_SIZE });
     DEFER_close(db);
 
     // 1) Write phase: register 100 users in a single write transaction
