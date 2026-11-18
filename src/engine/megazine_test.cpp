@@ -237,25 +237,33 @@ int main()
         std::cout << first_page[0] << " " << first_page[1] << '\n';*/
     }
 
-    // unsafe page add
     {
-        auto trx = db.trx_w(0);
+        /*auto trx = db.trx_w(0);
         DEFER_close(trx);
 
-        auto last_page_index = trx.push_page();
-        auto last_page_mut = (uint64_t*)trx.get_mut_page(last_page_index);
-
-        last_page_mut[0] = 123;
-
-        //auto first_page = (uint64_t const*)trx.get_page(0);
-        auto last_page = (uint64_t const*)trx.get_page(last_page_index);
-        std::cout << "TrxW sees: " << last_page[0] << " " << last_page[1] << '\n';
-        std::cout << "TrxW Pages Count: " << trx.pages_count() << '\n';
-
-        //trx.abort();
+        std::cout << "(Before) TrxW Pages Count: " << trx.pages_count() << '\n';
+        trx.pop_page();*/
     }
 
-    std::cout << "TrxR sees: " << '\n';
+    {
+        //auto trx = db.trx_w(0);
+        //DEFER_close(trx);
+
+        //std::cout << "(Before) TrxW Pages Count: " << trx.pages_count() << '\n';
+        //auto last_page_index = trx.push_page();
+        //auto last_page_mut = (uint64_t*)trx.get_mut_page(last_page_index);
+
+        //last_page_mut[0] = 123;
+
+        ////auto first_page = (uint64_t const*)trx.get_page(0);
+        //auto last_page = (uint64_t const*)trx.get_page(last_page_index);
+        //std::cout << "TrxW sees: " << last_page[0] << " " << last_page[1] << '\n';
+        //std::cout << "TrxW Pages Count: " << trx.pages_count() << '\n';
+
+        ////trx.abort();
+    }
+
+    std::cout << "(Outside) TrxR sees: " << '\n';
     dump_db(0);
 
     return 0;

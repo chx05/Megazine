@@ -211,15 +211,21 @@ constexpr epoch_t EPOCH_NONE = (epoch_t)-1;
 
 struct DbConfig
 {
+	// all of these can be changed on the fly even during the program is running
+	// but be very cautious about what you change
 	uint64_t page_size = 4096;
-	// TODO, use these
 	uint64_t initial_pages_capacity_reader = 10;
 	uint64_t initial_pages_capacity_writer = 10;
 	uint64_t initial_roots_pool_capacity = 5;
+
+	// none of these can be changed after initialization, new values will be ignored
+	char const* postfix_for_temp_commit_file = ".last_commit";
 };
 
-bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void* dest_buffer, DbConfig const* config)
+bool read_page_from_file(file_descriptor_t fd, page_index_t page_index, void* dest_buffer, DbConfig const* config)
 {
+	auto file_offset = page_index * config->page_size;
+
 	OVERLAPPED ov = { 0 };
 	ov.Offset = (DWORD)(file_offset);
 	ov.OffsetHigh = (DWORD)(file_offset >> 32);
@@ -233,7 +239,7 @@ bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void* dest_
 	{
 		if (GetLastError() == ERROR_IO_PENDING)
 		{
-			// Wait synchronously for this specific thread's operation
+			// wait synchronously for this specific thread's operation
 			ok = GetOverlappedResult(fd, &ov, &bytes, TRUE);
 		}
 	}
@@ -242,15 +248,99 @@ bool read_page_from_file(file_descriptor_t fd, uint64_t file_offset, void* dest_
 	return ok && (bytes == config->page_size);
 }
 
-// TODO this must be ported to async as well like read_page_from_file
-bool write_page_to_file(file_descriptor_t fd, uint64_t file_offset, void const* source_buffer, DbConfig const* config)
+bool write_page_to_file(file_descriptor_t fd, page_index_t page_index, void const* source_buffer, DbConfig const* config)
 {
+	auto file_offset = page_index * config->page_size;
+
 	OVERLAPPED ov = { 0 };
 	ov.Offset = (DWORD)(file_offset);
 	ov.OffsetHigh = (DWORD)(file_offset >> 32);
 
 	DWORD bytes = 0;
 	return WriteFile(fd, source_buffer, (DWORD)config->page_size, &bytes, &ov);
+}
+
+bool atomic_write_file(const char* path, const void* data, uint64_t size)
+{
+	char tmp_path[MAX_PATH];
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+	// 1. Write to a temporary file in the same directory
+	HANDLE h = CreateFileA(tmp_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h == INVALID_HANDLE_VALUE) return false;
+
+	DWORD written;
+	if (!WriteFile(h, data, (DWORD)size, &written, NULL) || written != (DWORD)size) {
+		CloseHandle(h);
+		DeleteFileA(tmp_path);
+		return false;
+	}
+
+	// 2. Ensure data hits disk before replacing
+	FlushFileBuffers(h);
+	CloseHandle(h);
+
+	// 3. Atomically replace the target file
+	if (!MoveFileExA(tmp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+		DeleteFileA(tmp_path);
+		return false;
+	}
+
+	return true;
+}
+
+bool file_exists(const char* path)
+{
+	DWORD attr = GetFileAttributesA(path);
+	return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+}
+
+uint8_t* read_all_file(const char* path, uint64_t* out_size)
+{
+	HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (h == INVALID_HANDLE_VALUE) return nullptr;
+
+	LARGE_INTEGER size;
+	if (!GetFileSizeEx(h, &size)) {
+		CloseHandle(h);
+		return nullptr;
+	}
+
+	uint8_t* buffer = new uint8_t[size.QuadPart];
+	uint64_t total_read = 0;
+
+	while (total_read < (uint64_t)size.QuadPart) {
+		DWORD to_read = (DWORD)std::min((uint64_t)size.QuadPart - total_read, (uint64_t)MAXDWORD);
+		DWORD bytes_read = 0;
+		if (!ReadFile(h, buffer + total_read, to_read, &bytes_read, nullptr) || bytes_read == 0) {
+			delete[] buffer;
+			CloseHandle(h);
+			return nullptr;
+		}
+		total_read += bytes_read;
+	}
+
+	CloseHandle(h);
+	if (out_size) *out_size = total_read;
+	return buffer; // Free with: delete[] buffer;
+}
+
+bool resize_file(file_descriptor_t fd, uint64_t page_count, DbConfig const* config)
+{
+	LARGE_INTEGER li;
+	li.QuadPart = (LONGLONG)(page_count * config->page_size);
+	return SetFilePointerEx(fd, li, NULL, FILE_BEGIN) && SetEndOfFile(fd);
+}
+
+void write_buffer(void* dest, uint64_t* cursor, void const* buffer, uint64_t count)
+{
+	memcpy((void*)((uint64_t)dest + *cursor), buffer, count);
+	*cursor += count;
+}
+
+void write_u64(void* dest, uint64_t* cursor, uint64_t value)
+{
+	write_buffer(dest, cursor, &value, sizeof(uint64_t));
 }
 
 template<typename T>
@@ -602,26 +692,84 @@ struct DiffBuffer
 	{
 		return map.refs[page_index];
 	}
+
+	void atomically_flush_diffs_to_commit_file(char const* commit_filename, DbConfig const* config) const
+	{
+		// counting pages
+		uint64_t pages_count = 0;
+		for (auto i = 0; i < map.flags.count; i++)
+			if (map.flags.buffer[i].raw() == PageFlag::modified)
+				pages_count++;
+
+		// TODO avoid allocation here
+		auto dest_size =
+			+ sizeof(uint64_t) // total pages count
+			+ sizeof(uint64_t) // diffed pages count
+			+ (pages_count * sizeof(uint64_t) + pages_count * config->page_size)
+			; // indices + contents
+
+		auto dest = new uint8_t[dest_size];
+		uint64_t cursor = 0;
+
+		write_u64(dest, &cursor, count());     // total pages count
+		write_u64(dest, &cursor, pages_count); // diffed pages count
+
+		// writing all page indices
+		for (auto i = 0; i < map.flags.count; i++)
+			if (map.flags.buffer[i].raw() == PageFlag::modified)
+				write_u64(dest, &cursor, i);
+
+		// writing all page contents
+		for (auto i = 0; i < map.flags.count; i++)
+			if (map.flags.buffer[i].raw() == PageFlag::modified)
+				write_buffer(dest, &cursor, map.refs.buffer[i], config->page_size);
+
+
+		atomic_write_file(commit_filename, dest, dest_size);
+		delete[] dest;
+	}
+
+	void apply_to_master_file(file_descriptor_t fd, DbConfig const* config)
+	{
+		resize_file(fd, count(), config);
+
+		for (auto i = 0; i < map.flags.count; i++)
+			if (map.flags.buffer[i].raw() == PageFlag::modified)
+			{
+				*map.flags.buffer[i].raw_mut() = PageFlag::not_loaded;
+				write_page_to_file(fd, i, map.refs.buffer[i], config);
+			}
+
+		// TODO
+		// instead of dropping, the chain should be pruned
+		// to leave only one node
+		auto capacity_per_node = arena.capacity_per_node;
+		arena.drop();
+		arena = StableArena<uint8_t>::create(capacity_per_node);
+	}
 };
 
 struct Root
 {
 	PagedBuffer paged_buffer;
+	epoch_t epoch_stamp;
 
-	static Root create(uint64_t file_size, DbConfig const* config)
+	static Root create(epoch_t epoch_stamp, uint64_t file_size, DbConfig const* config)
 	{
 		return {
 			.paged_buffer = PagedBuffer::create(file_size, config),
+			.epoch_stamp = epoch_stamp
 		};
 	}
 
-	static Root consume(DiffBuffer diffs)
+	static Root consume(epoch_t epoch_stamp, DiffBuffer diffs)
 	{
 		return {
 			.paged_buffer = {
 				.arena = diffs.arena,
 				.map = Reader_PageMap::consume(diffs.map)
-			}
+			},
+			.epoch_stamp = epoch_stamp
 		};
 	}
 
@@ -638,7 +786,6 @@ struct TrxR
 {
 	Root* root;
 	Db* db_ref;
-	epoch_t epoch_stamp;
 	thread_id_t thread_id;
 
 	void load_page(page_index_t page_index);
@@ -743,12 +890,12 @@ struct TrxW
 
 	void pop_page()
 	{
+		assert(pages_count() > 0);
 		modify_file_size(file_size() - page_size());
 	}
 
 	void modify_file_size(uint64_t new_file_size)
 	{
-		assert(new_file_size > 0);
 		assert(new_file_size % page_size() == 0);
 
 		auto previous_pages_count = diffs.count();
@@ -884,8 +1031,11 @@ struct RootsPool
 struct Db
 {
 	DbConfig config;
+
 	char const* filename;
 	file_descriptor_t fd = INVALID_HANDLE_VALUE;
+
+	char const* last_commit_filename;
 	
 	RootsPool roots_pool;
 	PotentiallyAtomic<Root*> root;
@@ -905,22 +1055,54 @@ struct Db
 			NULL
 		);
 
+		// TODO avoid using strlen here, use ptr+len strings instead
+		auto last_commit_filename_len = strlen(filename) + strlen(config.postfix_for_temp_commit_file);
+		auto last_commit_filename = new char[last_commit_filename_len + 1];
+		snprintf(last_commit_filename, last_commit_filename_len + 1, "%s%s", filename, config.postfix_for_temp_commit_file);
+
+		if (file_exists(last_commit_filename))
+		{
+			// easier to understand by taking a look at atomically_flush_diffs_to_commit_file
+			uint64_t last_commit_size;
+			auto last_commit = read_all_file(last_commit_filename, &last_commit_size);
+			auto last_commit_u64 = (uint64_t const*)last_commit;
+			auto total_pages_count = last_commit_u64[0];
+			auto diff_pages_count = last_commit_u64[1];
+			auto indices = &last_commit_u64[2];
+			auto contents = (uint8_t const*)(
+				&indices[diff_pages_count]
+			);
+
+			resize_file(fd, total_pages_count, &config);
+			
+			for (auto i = 0; i < diff_pages_count; i++)
+				write_page_to_file(fd, indices[i], &contents[i * config.page_size], &config);
+
+			delete[] last_commit;
+			std::remove(last_commit_filename);
+		}
+
 		LARGE_INTEGER file_size_result;
 		GetFileSizeEx(fd, &file_size_result);
 		auto file_size = (uint64_t)file_size_result.QuadPart;
 
+		auto starting_epoch = PotentiallyAtomic<epoch_t>::create(0);
 		auto thread_map = ThreadMap::create(threads_count);
 		auto roots_pool = RootsPool::create(&config);
 		auto first_root = roots_pool.alloc_root(&thread_map);
-		*first_root = Root::create(file_size, &config);
+		*first_root = Root::create(starting_epoch.increment(), file_size, &config);
 
 		return {
 			.config = config,
+
 			.filename = filename,
 			.fd = fd,
+
+			.last_commit_filename = last_commit_filename,
+
 			.roots_pool = roots_pool,
 			.root = first_root,
-			.epoch = PotentiallyAtomic<epoch_t>::create(0),
+			.epoch = starting_epoch,
 			.thread_map = thread_map
 		};
 	}
@@ -948,7 +1130,6 @@ struct Db
 
 	TrxR trx_r(thread_id_t thread_id)
 	{
-		auto epoch_stamp = epoch.increment();
 		auto slot = &thread_map.buffer[thread_id].aligned_value;
 		
 		// take the first root that is not being discarded in that same moment
@@ -957,7 +1138,7 @@ struct Db
 		{
 			current_root = root.acquire();
 			// announce
-			slot->current_epoch.store_seq_cst(epoch_stamp);
+			slot->current_epoch.store_seq_cst(current_root->epoch_stamp);
 			slot->root_in_use.store_seq_cst(current_root);
 			// if the root changed in between, the writer may have missed the announcement -> retry
 			if (root.load_seq_cst() == current_root)
@@ -967,7 +1148,6 @@ struct Db
 		return {
 			.root = current_root,
 			.db_ref = this,
-			.epoch_stamp = epoch_stamp,
 			.thread_id = thread_id
 		};
 	}
@@ -975,6 +1155,15 @@ struct Db
 	TrxW trx_w(thread_id_t thread_id)
 	{
 		return TrxW::create(trx_r(thread_id));
+	}
+
+	bool is_youngest_trx(epoch_t trx_epoch)
+	{
+		for (auto i = 0; i < thread_map.count; i++)
+			if (thread_map.buffer[i].aligned_value.current_epoch.load_relaxed() <= trx_epoch)
+				return false;
+		
+		return true;
 	}
 };
 
@@ -984,8 +1173,7 @@ struct Db
 void TrxR::load_page(page_index_t page_index)
 {
 	root->paged_buffer.concurrent_alloc_and_map_page(page_index, db_config());
-	uint64_t file_offset = page_index * page_size();
-	read_page_from_file(db_ref->fd, file_offset, (void*)root->paged_buffer.pointer_of(page_index), db_config());
+	read_page_from_file(db_ref->fd, page_index, (void*)root->paged_buffer.pointer_of(page_index), db_config());
 }
 
 DbConfig const* TrxR::db_config() const
@@ -1045,8 +1233,16 @@ void TrxW::close()
 		*diffs.map.flags[i].raw_mut() = PageFlag::modified;
 	}
 
+	// persist commit to disk
+	// TODO
+	// implement disk-commit atomicity via checksum, without fsync
+	diffs.atomically_flush_diffs_to_commit_file(trx_r.db_ref->last_commit_filename, db_config());
+	if (trx_r.db_ref->is_youngest_trx(trx_r.root->epoch_stamp))
+		diffs.apply_to_master_file(trx_r.db_ref->fd, db_config());
+
 	// deliberately not dropping diffbuffer
-	*new_root = Root::consume(diffs);
+	auto new_epoch = trx_r.db_ref->epoch.increment();
+	*new_root = Root::consume(new_epoch, diffs);
 	trx_r.db_ref->root.swap_seq_cst(new_root);
 
 	// release the base root only after publishing
