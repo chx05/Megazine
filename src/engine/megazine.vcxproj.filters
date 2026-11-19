@@ -21,16 +21,19 @@
     <ClCompile Include="megazine_test.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="megazine_engine.cpp">
-      <Filter>Source Files</Filter>
+    <ClCompile Include="megazine_engine.hpp">
+      <Filter>Header Files</Filter>
     </ClCompile>
-    <ClCompile Include="bench2b.cpp">
+    <ClCompile Include="benchmarks\bench_user.cpp">
       <Filter>Benchmarks</Filter>
     </ClCompile>
-    <ClCompile Include="bench1.cpp">
+    <ClCompile Include="benchmarks\bench1.cpp">
       <Filter>Benchmarks</Filter>
     </ClCompile>
-    <ClCompile Include="bench2a.cpp">
+    <ClCompile Include="benchmarks\bench2a.cpp">
+      <Filter>Benchmarks</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmarks\bench2b.cpp">
       <Filter>Benchmarks</Filter>
     </ClCompile>
   </ItemGroup>
@@ -38,7 +41,7 @@
     <None Include="test">
       <Filter>Resource Files</Filter>
     </None>
-    <None Include="build_bench.bat">
+    <None Include="benchmarks\build_bench.bat">
       <Filter>Benchmarks</Filter>
     </None>
   </ItemGroup>

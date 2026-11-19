@@ -131,7 +131,7 @@ void dump_db(thread_id_t thread_id)
 
 int main()
 {
-    db = Db::open("test2", 50, { .page_size = PAGE_SIZE });
+    db = Db::open("test2", { .page_size = PAGE_SIZE, .threads_count = 50 });
     DEFER_close(db);
 
     {

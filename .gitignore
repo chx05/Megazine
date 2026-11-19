@@ -1,6 +1,8 @@
 *.db
 *.last_commit
 *.db-wal
+*.db-shn
+*.db-journal
 *.db-lck
 *.out
 *.exe

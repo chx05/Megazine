@@ -15,7 +15,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "megazine_engine.hpp"
+#include "..\megazine_engine.hpp"
 
 struct User
 {
@@ -124,7 +124,7 @@ int main()
     }
     uint64_t const expected_avg = expected_sum / NUM_USERS;
 
-    db = Db::open(DB_PATH, 1, { .page_size = PAGE_SIZE });
+    db = Db::open(DB_PATH, { .page_size = PAGE_SIZE });
     DEFER_close(db);
 
     // 1) Write phase

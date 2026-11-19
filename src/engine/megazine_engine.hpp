@@ -13,13 +13,6 @@
 #include <memory>
 
 // TODO
-// try using mmap() for lazy loading instead, the mutex and all the stuff
-// made this implementation weird.
-// for writers, the diff mechanism can be built ontop of it
-// for readers it makes no difference
-// BUT first it must be clear what's the workflow for committing correctly
-
-// TODO
 // add asserts and report helpers in debug builds
 
 template <typename>
@@ -220,6 +213,8 @@ struct DbConfig
 
 	// none of these can be changed after initialization, new values will be ignored
 	char const* postfix_for_temp_commit_file = ".last_commit";
+	bool commit_atomically = true;
+	uint32_t threads_count = 1;
 };
 
 bool read_page_from_file(file_descriptor_t fd, page_index_t page_index, void* dest_buffer, DbConfig const* config)
@@ -258,6 +253,33 @@ bool write_page_to_file(file_descriptor_t fd, page_index_t page_index, void cons
 
 	DWORD bytes = 0;
 	return WriteFile(fd, source_buffer, (DWORD)config->page_size, &bytes, &ov);
+}
+
+void write_all_file(file_descriptor_t fd, const void* data, uint64_t size)
+{
+    LARGE_INTEGER li;
+
+    // 1. Pre-allocate exact size & truncate old data (prevents NTFS fragmentation/allocation overhead)
+    li.QuadPart = size;
+    SetFilePointerEx(fd, li, NULL, FILE_BEGIN);
+    SetEndOfFile(fd);
+
+    // 2. Rewind to beginning
+    li.QuadPart = 0;
+    SetFilePointerEx(fd, li, NULL, FILE_BEGIN);
+
+    // 3. Write sequentially
+    const auto* ptr = static_cast<const unsigned char*>(data);
+    while (size > 0)
+    {
+        DWORD to_write = static_cast<DWORD>(size > 0xFFFFFFFF ? 0xFFFFFFFF : size);
+        DWORD written = 0;
+        if (!WriteFile(fd, ptr, to_write, &written, NULL) || written == 0)
+            break;
+
+        ptr += written;
+        size -= written;
+    }
 }
 
 bool atomic_write_file(const char* path, const void* data, uint64_t size)
@@ -693,7 +715,7 @@ struct DiffBuffer
 		return map.refs[page_index];
 	}
 
-	void atomically_flush_diffs_to_commit_file(char const* commit_filename, DbConfig const* config) const
+	void flush_diffs_to_commit_file(file_descriptor_t last_commit_fd, char const* last_commit_filename, DbConfig const* config) const
 	{
 		// counting pages
 		uint64_t pages_count = 0;
@@ -724,8 +746,11 @@ struct DiffBuffer
 			if (map.flags.buffer[i].raw() == PageFlag::modified)
 				write_buffer(dest, &cursor, map.refs.buffer[i], config->page_size);
 
-
-		atomic_write_file(commit_filename, dest, dest_size);
+		if (config->commit_atomically)
+			atomic_write_file(last_commit_filename, dest, dest_size);
+		else
+			write_all_file(last_commit_fd, dest, dest_size);
+		
 		delete[] dest;
 	}
 
@@ -741,6 +766,7 @@ struct DiffBuffer
 			}
 
 		// TODO
+		// idk rethink this
 		// instead of dropping, the chain should be pruned
 		// to leave only one node
 		auto capacity_per_node = arena.capacity_per_node;
@@ -952,10 +978,10 @@ struct ThreadMap
 	uint64_t count;
 	Aligned64<AtomicThreadInfo>* buffer;
 
-	static ThreadMap create(uint64_t count)
+	static ThreadMap create(DbConfig const* config)
 	{
-		auto buffer = new Aligned64<AtomicThreadInfo>[count];
-		for (auto i = 0; i < count; i++)
+		auto buffer = new Aligned64<AtomicThreadInfo>[config->threads_count];
+		for (uint32_t i = 0; i < config->threads_count; i++)
 			buffer[i] = {
 				.aligned_value = {
 					.current_epoch = PotentiallyAtomic<epoch_t>::create(EPOCH_NONE),
@@ -964,7 +990,7 @@ struct ThreadMap
 			};
 
 		return {
-			.count = count,
+			.count = config->threads_count,
 			.buffer = buffer,
 		};
 	}
@@ -1036,6 +1062,8 @@ struct Db
 	file_descriptor_t fd = INVALID_HANDLE_VALUE;
 
 	char const* last_commit_filename;
+	// IMPORTANT: this is only used when config.commit_atomically=false
+	file_descriptor_t last_commit_fd = INVALID_HANDLE_VALUE;
 	
 	RootsPool roots_pool;
 	PotentiallyAtomic<Root*> root;
@@ -1043,7 +1071,8 @@ struct Db
 
 	ThreadMap thread_map;
 
-	static Db open(char const* filename, uint32_t threads_count, DbConfig config)
+	// TODO put threads_count inside config instead
+	static Db open(char const* filename, DbConfig config)
 	{
 		auto master_file_existed_before_opening_fd = file_exists(filename);
 		auto fd = CreateFileA(
@@ -1063,11 +1092,11 @@ struct Db
 
 		if (file_exists(last_commit_filename))
 		{
-			// we ignore the last commit if the master file did not exist
+			// we ignore the last commit if the master file did not exist on db open
 			// the useless commit file will be deleted as well after this
 			if (master_file_existed_before_opening_fd)
 			{
-				// easier to understand by taking a look at atomically_flush_diffs_to_commit_file
+				// easier to understand by taking a look at flush_diffs_to_commit_file
 				uint64_t last_commit_size;
 				auto last_commit = read_all_file(last_commit_filename, &last_commit_size);
 				auto last_commit_u64 = (uint64_t const*)last_commit;
@@ -1089,12 +1118,25 @@ struct Db
 			std::remove(last_commit_filename);
 		}
 
+		file_descriptor_t last_commit_fd =
+			config.commit_atomically
+			? INVALID_HANDLE_VALUE
+			: CreateFileA(
+				last_commit_filename,
+				GENERIC_READ | GENERIC_WRITE,
+				FILE_SHARE_READ,
+				NULL,
+				CREATE_ALWAYS,
+				FILE_ATTRIBUTE_NORMAL,
+				NULL
+			);
+
 		LARGE_INTEGER file_size_result;
 		GetFileSizeEx(fd, &file_size_result);
 		auto file_size = (uint64_t)file_size_result.QuadPart;
 
 		auto starting_epoch = PotentiallyAtomic<epoch_t>::create(0);
-		auto thread_map = ThreadMap::create(threads_count);
+		auto thread_map = ThreadMap::create(&config);
 		auto roots_pool = RootsPool::create(&config);
 		auto first_root = roots_pool.alloc_root(&thread_map);
 		*first_root = Root::create(starting_epoch.increment(), file_size, &config);
@@ -1106,6 +1148,7 @@ struct Db
 			.fd = fd,
 
 			.last_commit_filename = last_commit_filename,
+			.last_commit_fd = last_commit_fd,
 
 			.roots_pool = roots_pool,
 			.root = first_root,
@@ -1167,7 +1210,7 @@ struct Db
 	bool is_youngest_trx(epoch_t trx_epoch)
 	{
 		for (auto i = 0; i < thread_map.count; i++)
-			if (thread_map.buffer[i].aligned_value.current_epoch.load_relaxed() <= trx_epoch)
+			if (thread_map.buffer[i].aligned_value.current_epoch.load_relaxed() < trx_epoch)
 				return false;
 		
 		return true;
@@ -1243,7 +1286,7 @@ void TrxW::close()
 	// persist commit to disk
 	// TODO
 	// implement disk-commit atomicity via checksum, without fsync
-	diffs.atomically_flush_diffs_to_commit_file(trx_r.db_ref->last_commit_filename, db_config());
+	diffs.flush_diffs_to_commit_file(trx_r.db_ref->last_commit_fd, trx_r.db_ref->last_commit_filename, db_config());
 	if (trx_r.db_ref->is_youngest_trx(trx_r.root->epoch_stamp))
 		diffs.apply_to_master_file(trx_r.db_ref->fd, db_config());
 
