@@ -1,2 +1,3 @@
 @g++ bench1.cpp -static -IC:/vcpkg/installed/x64-mingw-static/include -LC:/vcpkg/installed/x64-mingw-static/lib -lntdll -lwinmm -lsqlite3 -pthread -o bench1.exe -O3 -DNDEBUG
+@g++ bench1sum.cpp -static -IC:/vcpkg/installed/x64-mingw-static/include -LC:/vcpkg/installed/x64-mingw-static/lib -lntdll -lwinmm -lsqlite3 -pthread -o bench1sum.exe -O3 -DNDEBUG
 @g++ bench2.cpp -static -IC:/vcpkg/installed/x64-mingw-static/include -LC:/vcpkg/installed/x64-mingw-static/lib -lntdll -lwinmm -lsqlite3 -pthread -o bench2.exe -O3 -DNDEBUG

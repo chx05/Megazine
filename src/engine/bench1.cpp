@@ -21,15 +21,15 @@ struct User
     uint64_t magic_number;
 };
 
-constexpr uint64_t PAGE_SIZE = 8192 * 8;
+constexpr uint64_t PAGE_SIZE = 8192 * 2;
 
 static_assert(sizeof(User) == 16);
 static_assert(std::is_trivially_copyable_v<User>);
 static_assert(PAGE_SIZE >= sizeof(User), "PAGE_SIZE must fit at least one User (24 bytes)");
 
 constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 1'000'000;
-constexpr size_t NUM_QUERIES = 100'000;
+constexpr size_t NUM_USERS = 100'000;
+constexpr size_t NUM_QUERIES = 1'000;
 constexpr size_t USERS_PER_PAGE = PAGE_SIZE / sizeof(User);
 constexpr size_t PAGES_NEEDED = (NUM_USERS + USERS_PER_PAGE - 1) / USERS_PER_PAGE;
 
