@@ -1,3 +1,4 @@
 @g++ bench1.cpp -static -IC:/vcpkg/installed/x64-mingw-static/include -LC:/vcpkg/installed/x64-mingw-static/lib -lntdll -lwinmm -lsqlite3 -pthread -o bench1.exe -O3 -DNDEBUG
-@g++ bench1sum.cpp -static -IC:/vcpkg/installed/x64-mingw-static/include -LC:/vcpkg/installed/x64-mingw-static/lib -lntdll -lwinmm -lsqlite3 -pthread -o bench1sum.exe -O3 -DNDEBUG
 @g++ bench2.cpp -static -IC:/vcpkg/installed/x64-mingw-static/include -LC:/vcpkg/installed/x64-mingw-static/lib -lntdll -lwinmm -lsqlite3 -pthread -o bench2.exe -O3 -DNDEBUG
+
+@g++ bench1sum.cpp -static -IC:/vcpkg/installed/x64-mingw-static/include -LC:/vcpkg/installed/x64-mingw-static/lib -lntdll -lwinmm -lsqlite3 -pthread -o bench1sum.exe -O3 -DNDEBUG -march=native -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_USE_ALLOCA -DSQLITE_MAX_MMAP_SIZE=17179869184
