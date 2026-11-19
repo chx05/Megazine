@@ -18,8 +18,8 @@
 constexpr uint64_t PAGE_SIZE = 8192;
 
 constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 1000000;
-constexpr size_t NUM_QUERIES = 100;
+constexpr size_t NUM_USERS = 100'000;
+constexpr size_t NUM_QUERIES = 1'000;
 
 struct User
 {
@@ -505,7 +505,7 @@ std::vector<User> generate_users()
 
 int main()
 {
-    constexpr char const* DB_PATH = "test2_btree";
+    constexpr char const* DB_PATH = "bench2b.db";
     constexpr thread_id_t THREAD_ID = 0;
 
     std::error_code ec;

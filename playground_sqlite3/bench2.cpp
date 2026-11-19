@@ -14,8 +14,8 @@
 #include <sqlite3.h>
 
 constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 1000000;
-constexpr size_t NUM_QUERIES = 100;
+constexpr size_t NUM_USERS = 100'000;
+constexpr size_t NUM_QUERIES = 1'000;
 
 static_assert(NUM_USERS >= 2, "Ensures magic_number fits in signed sqlite3_int64");
 

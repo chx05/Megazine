@@ -13,8 +13,8 @@
 #include <sqlite3.h>
 
 constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 100000;
-constexpr size_t NUM_QUERIES = 100;
+constexpr size_t NUM_USERS = 100'000;
+constexpr size_t NUM_QUERIES = 1'000;
 
 static_assert(NUM_USERS >= 2, "Ensures magic_number fits in signed sqlite3_int64");
 
@@ -76,7 +76,7 @@ struct SqliteStmtGuard
     }
 };
 
-std::array<User, NUM_USERS> generate_users()
+std::vector<User> generate_users()
 {
     static constexpr char alphabet[] =
         "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -87,9 +87,10 @@ std::array<User, NUM_USERS> generate_users()
     std::uniform_int_distribution<uint64_t> magic_dist(
         0, std::numeric_limits<uint64_t>::max() / NUM_USERS);
 
-    std::array<User, NUM_USERS> users{};
+    std::vector<User> users{};
     for (size_t i = 0; i < NUM_USERS; ++i)
     {
+        users.push_back(User());
         bool unique = false;
         while (!unique)
         {

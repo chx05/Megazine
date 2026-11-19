@@ -12,18 +12,18 @@
 
 #include <mdbx.h>
 
+constexpr size_t USERNAME_LEN = 8;
+constexpr size_t NUM_USERS = 100'000;
+constexpr size_t NUM_QUERIES = 1'000;
+
 struct User
 {
-    char username[8];
+    char username[USERNAME_LEN];
     uint64_t magic_number;
 };
 
 static_assert(sizeof(User) == 16);
 static_assert(std::is_trivially_copyable_v<User>);
-
-constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 100000;
-constexpr size_t NUM_QUERIES = 100;
 
 inline void check_mdbx(int rc, char const* op)
 {
