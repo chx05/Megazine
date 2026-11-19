@@ -19,7 +19,7 @@
 constexpr uint64_t PAGE_SIZE = 8192;
 
 constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 100'000;
+constexpr size_t NUM_USERS = 1'000'000;
 constexpr size_t NUM_QUERIES = 1'000;
 
 struct User

@@ -18,7 +18,7 @@
 constexpr uint64_t PAGE_SIZE = 8192;
 
 constexpr size_t USERNAME_LEN = 8;
-constexpr size_t NUM_USERS = 100'000;
+constexpr size_t NUM_USERS = 1'000'000;
 constexpr size_t NUM_QUERIES = 1'000;
 
 struct User
@@ -484,22 +484,46 @@ std::vector<User> generate_users()
 {
     static constexpr char alphabet[] =
         "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    static constexpr size_t alphabet_len = sizeof(alphabet) - 1;
+    static constexpr size_t alphabet_len = sizeof(alphabet) - 1; // 62
+    static_assert(alphabet_len == 62 && USERNAME_LEN == 8);
+
+    // 62^8 = 2^8 * 31^8
+    constexpr uint64_t KEYSPACE = 218'340'105'584'896ULL;
+    // Both multipliers are coprime to 2 and 31, and safe against uint64_t overflow
+    constexpr uint64_t K1 = 180'000'000'001ULL;
+    constexpr uint64_t K2 = 81'919ULL;
+
+    static_assert(NUM_USERS <= KEYSPACE, "More users than unique 8-char usernames");
+    static_assert(NUM_USERS <= (std::numeric_limits<uint64_t>::max() - KEYSPACE) / K1);
+    static_assert((KEYSPACE - 1) <= (std::numeric_limits<uint64_t>::max() - (KEYSPACE - 1)) / K2);
 
     std::mt19937_64 rng(std::random_device{}());
-    std::uniform_int_distribution<size_t> char_dist(0, alphabet_len - 1);
+    std::uniform_int_distribution<uint64_t> key_dist(0, KEYSPACE - 1);
+    // Use int64_t::max() / NUM_USERS if you want larger values without overflowing SQLite SUM() to REAL
     std::uniform_int_distribution<uint64_t> magic_dist(
-        0, std::numeric_limits<uint64_t>::max() / NUM_USERS);
+        0, std::numeric_limits<uint32_t>::max() / NUM_USERS);
 
-    std::vector<User> users(NUM_USERS);
+    uint64_t const offset1 = key_dist(rng);
+    uint64_t const offset2 = key_dist(rng);
+
+    std::vector<User> users;
+    users.reserve(NUM_USERS);
+
     for (size_t i = 0; i < NUM_USERS; ++i)
     {
-        for (size_t c = 0; c < USERNAME_LEN; ++c)
+        uint64_t const x = (static_cast<uint64_t>(i) * K1 + offset1) % KEYSPACE;
+        uint64_t code = (x * K2 + offset2) % KEYSPACE;
+
+        User u{};
+        for (size_t c = USERNAME_LEN; c-- > 0;)
         {
-            users[i].username[c] = alphabet[char_dist(rng)];
+            u.username[c] = alphabet[code % alphabet_len];
+            code /= alphabet_len;
         }
-        users[i].magic_number = magic_dist(rng);
+        u.magic_number = magic_dist(rng);
+        users.push_back(u);
     }
+
     return users;
 }
 
