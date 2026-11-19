@@ -84,7 +84,7 @@ std::array<User, NUM_USERS> generate_users()
 
 int main()
 {
-    constexpr char const* DB_PATH = "test2_mdbx";
+    constexpr char const* DB_PATH = "test2_mdbx.db";
 
     std::error_code ec;
     std::filesystem::remove(DB_PATH, ec);

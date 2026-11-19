@@ -1,3 +1,7 @@
+*.db
+*.last_commit
+*.db-wal
+*.db-lck
 *.out
 *.exe
 .vscode/
