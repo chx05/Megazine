@@ -1045,6 +1045,7 @@ struct Db
 
 	static Db open(char const* filename, uint32_t threads_count, DbConfig config)
 	{
+		auto master_file_existed_before_opening_fd = file_exists(filename);
 		auto fd = CreateFileA(
 			filename,
 			GENERIC_READ | GENERIC_WRITE,
@@ -1062,23 +1063,29 @@ struct Db
 
 		if (file_exists(last_commit_filename))
 		{
-			// easier to understand by taking a look at atomically_flush_diffs_to_commit_file
-			uint64_t last_commit_size;
-			auto last_commit = read_all_file(last_commit_filename, &last_commit_size);
-			auto last_commit_u64 = (uint64_t const*)last_commit;
-			auto total_pages_count = last_commit_u64[0];
-			auto diff_pages_count = last_commit_u64[1];
-			auto indices = &last_commit_u64[2];
-			auto contents = (uint8_t const*)(
-				&indices[diff_pages_count]
-			);
+			// we ignore the last commit if the master file did not exist
+			// the useless commit file will be deleted as well after this
+			if (master_file_existed_before_opening_fd)
+			{
+				// easier to understand by taking a look at atomically_flush_diffs_to_commit_file
+				uint64_t last_commit_size;
+				auto last_commit = read_all_file(last_commit_filename, &last_commit_size);
+				auto last_commit_u64 = (uint64_t const*)last_commit;
+				auto total_pages_count = last_commit_u64[0];
+				auto diff_pages_count = last_commit_u64[1];
+				auto indices = &last_commit_u64[2];
+				auto contents = (uint8_t const*)(
+					&indices[diff_pages_count]
+				);
 
-			resize_file(fd, total_pages_count, &config);
-			
-			for (auto i = 0; i < diff_pages_count; i++)
-				write_page_to_file(fd, indices[i], &contents[i * config.page_size], &config);
+				resize_file(fd, total_pages_count, &config);
 
-			delete[] last_commit;
+				for (auto i = 0; i < diff_pages_count; i++)
+					write_page_to_file(fd, indices[i], &contents[i * config.page_size], &config);
+
+				delete[] last_commit;
+			}
+
 			std::remove(last_commit_filename);
 		}
 

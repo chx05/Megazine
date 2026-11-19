@@ -131,7 +131,7 @@ void dump_db(thread_id_t thread_id)
 
 int main()
 {
-    db = Db::open("test2", 1, { .page_size = PAGE_SIZE });
+    db = Db::open("test2", 50, { .page_size = PAGE_SIZE });
     DEFER_close(db);
 
     {
@@ -221,7 +221,7 @@ int main()
         //DEFER_close(trx);
 
         //auto first_page_mut = (uint64_t*)trx.get_mut_page(0);
-        //first_page_mut[0] = 30;
+        //first_page_mut[0] = 123;
 
         //auto first_page = (uint64_t const*)trx.get_page(0);
         //std::cout << first_page[0] << " " << first_page[1] << '\n';
